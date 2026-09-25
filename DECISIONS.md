@@ -110,10 +110,17 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 
 - **Schedule diario a las 00:30 UTC:** margen de gracia de 30 minutos después de la actualización de la fuente. DummyJSON no expone ninguna señal de disponibilidad (endpoint de metadata, archivo marker), así que el margen es la única herramienta disponible.
 - **Alineación con la semántica de Airflow:** la corrida que se ejecuta el día D+1 a las 00:30 cubre el intervalo que empieza el día D. La fecha lógica coincide con la fecha de negocio sin transformaciones adicionales.
+- **Timetable explícito (`CronDataIntervalTimetable`), hallazgo de Airflow 3:** en Airflow 3, `[scheduler] create_cron_data_intervals` es `False` por default, así que un schedule cron escrito como string (`"30 0 * * *"`) se interpreta como `CronTriggerTimetable`: **no hay intervalo de datos** y `logical_date`, `data_interval_start`, `data_interval_end` y `run_after` valen lo mismo, el momento del disparo. Se detectó en la primera corrida real: la corrida del 25/09 00:30 cargó bronze con `audit_logical_date = 2026-09-25`, cuando por la semántica de "día cerrado" esos datos son del 24/09. El punto anterior asumía el comportamiento de Airflow 2. Por eso el DAG declara `schedule=CronDataIntervalTimetable("30 0 * * *", timezone="UTC")`: la corrida del D+1 00:30 tiene intervalo [D 00:30, D+1 00:30) y `logical_date = D`, y así vuelve a valer la alineación sin reglas implícitas de "-1 día". Verificado con una corrida real (`logical_date` y `data_interval_start` = 24/09, bronze con `audit_logical_date = 2026-09-24`) y cubierto por el test de integridad del DAG, que falla si el timetable no es de intervalos.
 - **`catchup=False`:** la API no tiene historia. Un backfill capturaría los datos de hoy y los etiquetaría con fechas pasadas: datos incorrectos que parecen correctos. La extracción no es re-ejecutable hacia atrás; las transformaciones sí, desde bronze.
-- **Reintentos con backoff** ante fallas de la API o respuestas incompletas.
+- **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Limitación conocida:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo cerrado es el de anteayer, y esa primera corrida etiquetaría con esa fecha los datos del día recién cerrado. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
+- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Los errores de configuración de la corrida (un `business_date` inválido) fallan sin reintentos (`AirflowFailException`), porque reintentar no los corrige.
 - **Fallas visibles:** un `on_failure_callback` registra un log estructurado con el DAG, la task, la fecha de negocio y el error. No se conectan canales externos (Slack, email) porque requerirían credenciales, que el enunciado excluye.
-- **[PENDIENTE] Corridas manuales:** en Airflow 3, las corridas disparadas manualmente pueden no tener fecha lógica ni intervalo de datos asociado. Hay que resolver explícitamente la fecha de negocio para ese caso y cubrirlo con un test.
+- **Corridas manuales:** verificado con triggers reales (REST API, que es la que usa la UI, y CLI) en Airflow 3.3.2: las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. `resolve_business_date` resuelve la fecha así:
+  - Corrida programada: fecha de `data_interval_start`, en UTC.
+  - Cualquier otra corrida (manual o disparada desde otro DAG): `conf["business_date"]` si viene (formato `YYYY-MM-DD`); si no, el día anterior a `run_after` en UTC. Se rechazan fechas mal formadas y días que todavía no cerraron (`>=` la fecha de `run_after`), porque la fuente todavía no los expone.
+  - El DAG declara el parámetro `business_date`, así el formulario de trigger de la UI lo muestra.
+
+  Una corrida manual con fecha explícita etiqueta con esa fecha los datos que la API expone **hoy**. Sirve para recuperar el día inmediato anterior si falló la corrida programada. Para días más viejos, la advertencia de `catchup` sigue valiendo.
 
 ### 1.7 Calidad de datos
 
@@ -175,6 +182,8 @@ Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al e
 - **Resolución de la fecha de negocio:** corridas programadas, corridas manuales con y sin parámetro explícito.
 - **Integridad del DAG:** el DAG carga sin errores de import y tiene las tasks y dependencias esperadas.
 
+**Dónde corren:** en Docker, con una etapa `dev` del mismo Dockerfile de Airflow (la imagen de runtime más `ruff`, `pytest` y `responses`), expuesta como el servicio `tests` del compose (profile `dev`): `docker compose run --rm tests`. Los tests corren con las mismas versiones que el runtime y no hace falta instalar Python en el host. Los tests del loader corren contra el Postgres del warehouse, cada uno en un schema temporal que se crea y se borra.
+
 **Tests de datos (dbt):** los descritos en 1.7, ejecutados como parte de cada corrida del pipeline. Un test fallido en silver impide construir gold.
 
 **CI (GitHub Actions), en cada push:**
@@ -203,7 +212,13 @@ CI **no llama a la API real**: bronze se carga con fixtures versionadas en el re
 - **Fecha lógica.** Cuestioné la necesidad de una tercera fecha, porque en mi experiencia con CDC alcanzaban dos. La discusión dejó claro que la diferencia no está en los reintentos sino en la semántica: bajo la interpretación de "día cerrado", la fecha del dato y la de ejecución difieren siempre, y la fecha lógica evita una regla implícita acoplada al schedule.
 - **Nomenclatura.** Ajusté los nombres para que `revenue` y `gross_revenue` fueran explícitos y consistentes en inglés.
 
-**Implementación (Claude Code).** [PENDIENTE]
+**Implementación (Claude Code).** [PENDIENTE: completar al cerrar las fases restantes]
+
+Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de avanzar y de consultar la documentación de la versión fijada de Airflow en lugar de asumir el comportamiento de Airflow 2. Casos concretos:
+
+- **Semántica de schedules cron en Airflow 3 (fase 2).** El diseño (sección 1.6) asumía que la corrida del D+1 cubre el intervalo del día D, como en Airflow 2. El DAG se escribió con el schedule como string cron y los tests unitarios pasaban, porque probaban `resolve_business_date` con un `data_interval_start` que armaba el propio test. El error apareció recién en la primera corrida real: bronze quedó con `audit_logical_date = 2026-09-25` en vez de `2026-09-24`. Consultando la metadata de la corrida se vio que `logical_date`, `data_interval_start` y `data_interval_end` eran iguales, por el nuevo default `create_cron_data_intervals = False`. Se corrigió declarando `CronDataIntervalTimetable`, y se agregó un test de integridad que falla si el DAG vuelve a un timetable sin intervalos. Lección: los tests unitarios validan la lógica contra los supuestos del código; solo la ejecución real valida los supuestos contra la plataforma.
+- **Corridas manuales.** El comportamiento de las corridas manuales (sin `logical_date` ni intervalo) se confirmó con triggers reales por REST y por CLI antes de darlo por cerrado, y no solo con la documentación.
+- **Reintentos inútiles.** La primera verificación con un `business_date` inválido mostró que la task gastaba 3 intentos (unos 6 minutos de backoff) en un error de configuración. Se cambió para que falle en el primer intento.
 
 ---
 

@@ -6,6 +6,7 @@ x-airflow-common:
   build:
     context: .
     dockerfile: docker/airflow/Dockerfile
+    target: runtime
   image: x3m-airflow:3.3.2
   environment:
     &airflow-common-env
@@ -132,6 +133,31 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+
+  # Lint + tests, on demand: `docker compose run --rm tests` (see README).
+  # Arguments are passed to `python -m`, e.g. `docker compose run --rm tests ruff check .`.
+  tests:
+    <<: *airflow-common
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+      target: dev
+    image: x3m-airflow-dev:3.3.2
+    profiles: ["dev"]
+    entrypoint: ["python", "-m"]
+    command: ["pytest"]
+    working_dir: /opt/airflow/project
+    environment:
+      <<: *airflow-common-env
+      PYTHONPATH: /opt/airflow/project/src
+      PYTHONDONTWRITEBYTECODE: '1'
+      RUFF_CACHE_DIR: /tmp/ruff-cache
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+    volumes:
+      - .:/opt/airflow/project:ro
+    depends_on:
+      warehouse:
+        condition: service_healthy
 
 volumes:
   airflow-metadata-db-data:

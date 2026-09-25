@@ -1,0 +1,5 @@
+# Lint and test tooling (Docker `dev` stage and CI). Installed together with the Airflow
+# constraints so shared dependencies keep the runtime versions.
+pytest==9.1.1
+responses==0.26.3
+ruff==0.16.9
