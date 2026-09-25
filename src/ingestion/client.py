@@ -25,13 +25,17 @@ class ExtractionResult:
 
 
 def build_session(retries: int = 5, backoff_factor: float = 1.0) -> requests.Session:
-    """Session that retries GETs on connection errors and 429/5xx with exponential backoff."""
+    """Session that retries GETs on connection errors and 429/5xx with exponential backoff.
+
+    `Retry-After` is ignored on purpose: urllib3 doesn't cap it, so a large value would stall the
+    task. Our own bounded backoff applies to 429 too.
+    """
     retry = Retry(
         total=retries,
         backoff_factor=backoff_factor,
         status_forcelist=RETRY_STATUSES,
         allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
+        respect_retry_after_header=False,
     )
     session = requests.Session()
     session.mount("https://", HTTPAdapter(max_retries=retry))

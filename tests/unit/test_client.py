@@ -2,6 +2,7 @@ import pytest
 import requests
 import responses
 from responses import matchers
+from urllib3.response import HTTPResponse
 
 from ingestion.client import ExtractionError, build_session, fetch_all
 from ingestion.config import get_entity
@@ -106,6 +107,22 @@ def test_retries_transient_errors(status):
 
     assert [r["id"] for r in result.records] == [1]
     assert len(responses.calls) == 2
+
+
+def test_ignores_retry_after_header(monkeypatch):
+    # `responses` simulates retries without ever sleeping, so the wait is tested on the session's
+    # Retry directly: a 429 asking to wait 1 hour must fall back to our bounded backoff.
+    sleeps = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    retry = build_session(retries=3, backoff_factor=1).get_adapter(URL).max_retries
+    response = HTTPResponse(status=429, headers={"Retry-After": "3600"})
+
+    # Second consecutive error: urllib3 applies no backoff after the first one.
+    for _ in range(2):
+        retry = retry.increment(method="GET", url=URL, response=response)
+    retry.sleep(response)
+
+    assert sleeps and max(sleeps) < 3600
 
 
 @responses.activate

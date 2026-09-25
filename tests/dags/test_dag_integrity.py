@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 import pytest
 from airflow.dag_processing.dagbag import DagBag
@@ -52,4 +53,5 @@ def test_tasks_and_dependencies(dag):
 def test_tasks_retry_and_report_failures(dag):
     for task in dag.tasks:
         assert task.retries == 2
+        assert task.execution_timeout == timedelta(minutes=10)
         assert on_task_failure in task.on_failure_callback

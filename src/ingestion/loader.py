@@ -11,11 +11,14 @@ from psycopg.types.json import Jsonb
 from ingestion.config import EntityConfig, warehouse_conninfo
 
 BRONZE_SCHEMA = "bronze"
+CONNECT_TIMEOUT_S = 10
 
 
 def connect(conninfo: str | None = None) -> psycopg.Connection:
     """Autocommit connection: transactions are opened explicitly with `conn.transaction()`."""
-    return psycopg.connect(conninfo or warehouse_conninfo(), autocommit=True)
+    return psycopg.connect(
+        conninfo or warehouse_conninfo(), autocommit=True, connect_timeout=CONNECT_TIMEOUT_S
+    )
 
 
 def load_snapshot(

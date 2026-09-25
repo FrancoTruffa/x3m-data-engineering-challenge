@@ -39,6 +39,9 @@ from ingestion.run import extract_and_load
         "retries": 2,
         "retry_delay": timedelta(minutes=2),
         "retry_exponential_backoff": True,
+        # A normal run takes seconds. A hung task would block the next day's run
+        # (max_active_runs=1), and the source has no history to recover a missed day.
+        "execution_timeout": timedelta(minutes=10),
         "on_failure_callback": on_task_failure,
     },
     tags=["dummyjson", "bronze"],

@@ -114,6 +114,14 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **`catchup=False`:** la API no tiene historia. Un backfill capturaría los datos de hoy y los etiquetaría con fechas pasadas: datos incorrectos que parecen correctos. La extracción no es re-ejecutable hacia atrás; las transformaciones sí, desde bronze.
 - **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Limitación conocida:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo cerrado es el de anteayer, y esa primera corrida etiquetaría con esa fecha los datos del día recién cerrado. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
 - **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Los errores de configuración de la corrida (un `business_date` inválido) fallan sin reintentos (`AirflowFailException`), porque reintentar no los corrige.
+- **Toda espera tiene tope:**
+  - Timeout por request HTTP (5 s de conexión y 30 s de lectura).
+  - `connect_timeout` de 10 s hacia Postgres.
+  - `execution_timeout` de 10 minutos por task. Una corrida normal tarda unos segundos.
+  - El header `Retry-After` se ignora a propósito, porque urllib3 no lo limita y un valor de horas frenaría la task; ante un 429 se aplica nuestro backoff acotado.
+
+  El motivo es que, con `max_active_runs=1`, una task colgada bloquearía la corrida del día siguiente, y como la fuente no tiene historia, ese día se perdería. Una falla rápida es recuperable; una task colgada en silencio, no.
+- **Una extracción fallida no toca bronze:** se descarga el snapshot completo y se valida antes de abrir la conexión a la base. Si la API falla a mitad de camino, el `DELETE` del día nunca se ejecuta y la carga anterior queda intacta. Lo cubre un test.
 - **Fallas visibles:** un `on_failure_callback` registra un log estructurado con el DAG, la task, la fecha de negocio y el error. No se conectan canales externos (Slack, email) porque requerirían credenciales, que el enunciado excluye.
 - **Corridas manuales:** verificado con triggers reales (REST API, que es la que usa la UI, y CLI) en Airflow 3.3.2: las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. `resolve_business_date` resuelve la fecha así:
   - Corrida programada: fecha de `data_interval_start`, en UTC.
