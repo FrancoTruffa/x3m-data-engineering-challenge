@@ -42,8 +42,8 @@ Una tabla por entidad: `bronze.products` y `bronze.carts`. **Un registro de la A
 | `id` | Clave de origen |
 | `data` | JSON crudo completo (`jsonb`), sin modificar |
 | `audit_event_timestamp` | Timestamp de última modificación provisto por el sistema origen, cuando está disponible (`meta.updatedAt` en products; `null` en carts, porque la fuente no lo provee) |
-| `audit_ingestion_timestamp` | Momento en que el pipeline procesó el dato. Un único valor por corrida, para que un snapshot nunca quede partido entre dos timestamps |
-| `audit_logical_date` | Día al que pertenece el dato: fecha lógica de la corrida de Airflow |
+| `audit_ingestion_timestamp` | Momento en que el pipeline procesó el dato. Un único valor por carga de cada entidad (se toma justo antes de insertar), para que un snapshot nunca quede partido entre dos timestamps. Products y carts se cargan en tasks separadas, así que cada uno tiene su propio valor |
+| `audit_logical_date` | Día al que pertenece el dato: la **fecha de negocio** resuelta por `resolve_business_date` (ver 1.6). En corridas programadas coincide con la fecha lógica de Airflow (`data_interval_start`); en corridas manuales Airflow no tiene fecha lógica, y el valor sale de `conf["business_date"]` o del día anterior a `run_after` |
 | `audit_process_name` | Proceso que realizó la ingesta (`dag_id.task_id`), para trazabilidad |
 
 **Por qué tres fechas y no dos.** Cada una responde una pregunta distinta:
@@ -52,9 +52,9 @@ Una tabla por entidad: `bronze.products` y `bronze.carts`. **Un registro de la A
 |---|---|---|
 | `audit_event_timestamp` | ¿Cuándo cambió el registro en el origen? | La fuente |
 | `audit_ingestion_timestamp` | ¿Cuándo lo procesamos? | El reloj, al ejecutar |
-| `audit_logical_date` | ¿A qué día pertenece? | Airflow, al programar la corrida |
+| `audit_logical_date` | ¿A qué día pertenece? | Airflow, al programar la corrida (o quien dispara una corrida manual) |
 
-En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar el dato en el tiempo, y la fecha lógica no hace falta. Acá la fuente no provee ninguna fecha para carts, y con la interpretación de "día cerrado" la fecha del dato (D) y la de ejecución (D+1) caen **siempre** en días distintos. Derivar la fecha de negocio de `audit_ingestion_timestamp` requeriría una regla implícita (`- 1 día`) acoplada al horario de ejecución, que se rompería en silencio si cambiara el schedule. `audit_logical_date` hace explícita esa relación y no cambia con reintentos ni reruns.
+En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar el dato en el tiempo, y la fecha lógica no hace falta. Acá la fuente no provee ninguna fecha para carts, y con la interpretación de "día cerrado" la fecha del dato (D) y la de ejecución (D+1) caen **siempre** en días distintos. Derivar la fecha de negocio de `audit_ingestion_timestamp` requeriría una regla implícita (`- 1 día`) acoplada al horario de ejecución, que se rompería en silencio si cambiara el schedule. `audit_logical_date` hace explícita esa relación y no cambia con reintentos ni reruns. La única excepción es la corrida manual sin fecha explícita: ahí se usa el día anterior a `run_after` como default, porque Airflow no provee otra referencia. Es una regla visible, documentada y testeada en un único lugar (`resolve_business_date`), no una convención repartida aguas abajo.
 
 **Decisiones adicionales:**
 
@@ -195,6 +195,8 @@ Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al e
 CI **no llama a la API real**: bronze se carga con fixtures versionadas en el repo (una muestra pequeña de products y carts que incluye casos borde como líneas de producto duplicadas dentro de un cart). Así las transformaciones y los tests de calidad se validan con datos controlados y el resultado es determinístico. CI reproduce de forma automatizada lo mismo que hará el evaluador: clonar el repo en una máquina limpia y ejecutarlo.
 
 **Observabilidad:** la extracción emite **logs estructurados (JSON)** con entidad, fecha de negocio, páginas recorridas, registros obtenidos frente al total esperado y duración. Las fallas se registran mediante `on_failure_callback` (ver 1.6).
+
+- **JSON anidado en los logs de Airflow (trade-off aceptado):** el paquete `ingestion` escribe cada evento como un mensaje JSON con el `logging` estándar de Python. Airflow 3 escribe cada línea de log de una task como un JSON propio (structlog) y pone el mensaje en su campo `event`. Como nuestro mensaje es un string, queda escapado: `{"event": "{\"records\": 194, ...}", "task_id": ..., ...}`. Se puede leer (un `json.loads` del campo `event`), pero no queda plano. Para que los campos quedaran en el primer nivel habría que loguear con structlog, el logger de Airflow, y eso acoplaría el paquete de ingesta a Airflow, cuando el diseño pide que sea independiente. Fuera de Airflow (scripts, tests) el JSON sale plano.
 
 ---
 

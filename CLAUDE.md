@@ -23,7 +23,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 ## Modelo de datos (resumen; detalle en DECISIONS.md)
 
 - **Bronze** (`bronze.products`, `bronze.carts`): un registro de la API = una fila.
-  - Columnas: `id`, `data` (`jsonb` crudo), `audit_event_timestamp`, `audit_ingestion_timestamp` (un valor único por corrida), `audit_logical_date`, `audit_process_name`.
+  - Columnas: `id`, `data` (`jsonb` crudo), `audit_event_timestamp`, `audit_ingestion_timestamp` (un valor único por carga de cada entidad), `audit_logical_date` (la fecha de negocio resuelta; no siempre es la `logical_date` de Airflow), `audit_process_name`.
   - Carga idempotente: `DELETE WHERE audit_logical_date = D` + `INSERT` en una transacción.
 - **Silver** (dbt):
   - `products`: SCD1 por `product_id`, tabla completa.
@@ -37,11 +37,14 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 ## Semántica temporal (crítico)
 
 - La actualización de medianoche UTC cierra el día anterior: la corrida del día D+1 a las 00:30 UTC carga datos del día D.
-- Schedule `30 0 * * *`, `catchup=False`.
+- Schedule diario a las 00:30 UTC, `catchup=False`, declarado **siempre** como `schedule=CronDataIntervalTimetable("30 0 * * *", timezone="UTC")`. **Nunca como string cron.**
+  - La expresión cron es la misma; lo que cambia es cómo interpreta Airflow 3 la corrida. Un string cron se interpreta como `CronTriggerTimetable` (porque `create_cron_data_intervals = False` por default): la corrida es un disparo sin intervalo, y `logical_date = data_interval_start = run_after`. Con eso, la corrida del 25/09 00:30 etiquetaría como 25/09 los datos del 24/09.
+  - `CronDataIntervalTimetable` hace que la corrida del D+1 00:30 cubra el intervalo [D 00:30, D+1 00:30), así que `data_interval_start` es el día D.
+  - Verificado con una corrida real (DECISIONS 1.6). El test de integridad del DAG falla si el timetable no es `CronDataIntervalTimetable`.
 - La fecha de negocio se resuelve con una función pura `resolve_business_date(context)`:
   - **Corrida programada:** fecha de `data_interval_start`.
-  - **Corrida manual:** `conf["business_date"]` si viene; si no, el día anterior a `run_after` en UTC.
-- En Airflow 3, las corridas manuales pueden no tener `logical_date` ni `data_interval`. **Verificá el comportamiento real con un trigger manual.**
+  - **Corrida manual:** `conf["business_date"]` si viene; si no, el día anterior a `run_after` en UTC. Se rechazan fechas mal formadas o de días que todavía no cerraron.
+- En Airflow 3.3.2, las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. Esto está verificado con triggers reales por REST y por CLI.
 - La fecha de negocio se pasa a dbt con `--vars '{"logical_date": "YYYY-MM-DD"}'`.
 
 ## Estructura del repo
@@ -51,14 +54,14 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 ├── README.md
 ├── DECISIONS.md
 ├── CLAUDE.md
-├── docker-compose.yml
+├── docker-compose.yml          # stack + servicio `tests` (profile dev)
 ├── pyproject.toml              # config de ruff y pytest
 ├── requirements/
 │   ├── airflow.txt             # deps de runtime de Airflow (con constraints)
 │   ├── dbt.txt                 # deps del venv de dbt
 │   └── dev.txt                 # ruff, pytest, responses, etc.
 ├── docker/
-│   ├── airflow/Dockerfile      # Airflow + venv de dbt + dbt deps en build
+│   ├── airflow/Dockerfile      # etapas runtime (Airflow + venv de dbt + dbt deps) y dev (+ ruff/pytest)
 │   └── warehouse/init/         # SQL de init: schemas bronze/silver/gold + tablas bronze
 ├── dags/
 │   └── dummyjson_pipeline.py   # solo orquestación, sin lógica de negocio
@@ -68,7 +71,8 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │       ├── client.py           # cliente HTTP paginado con reintentos y validación de total
 │       ├── loader.py           # carga idempotente a bronze
 │       ├── business_date.py    # resolve_business_date
-│       └── logging.py          # logging estructurado (JSON)
+│       ├── logging.py          # logging estructurado (JSON) + on_failure_callback
+│       └── run.py              # extract_and_load: punto de entrada de cada task (config → client → loader → log)
 ├── dbt/
 │   ├── dbt_project.yml
 │   ├── packages.yml            # dbt_utils con versión exacta
@@ -100,6 +104,7 @@ extract_carts ────┘
 - Código, identificadores y comentarios en inglés. Documentación (README, DECISIONS) en español.
 - Toda la lógica en `src/`; el DAG solo orquesta.
 - Sin secretos en el repo. Las credenciales locales del compose son valores por defecto de desarrollo y se documentan como tales.
+- Lint y tests corren en Docker: `docker compose run --rm tests` (pytest) y `docker compose run --rm tests ruff check .`.
 
 ## Forma de trabajo
 
