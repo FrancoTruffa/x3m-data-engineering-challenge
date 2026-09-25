@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# dbt anonymous usage-stats id (created on first local dbt run)
+dbt/.user.yml

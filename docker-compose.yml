@@ -31,6 +31,11 @@ x-airflow-common:
     DBT_PROFILES_DIR: /opt/airflow/dbt
     DBT_TARGET_PATH: /tmp/dbt/target
     DBT_LOG_PATH: /tmp/dbt/logs
+    # A test runs only when all of its parents are selected: building silver must not run the
+    # gold-vs-silver reconciliation test before gold is rebuilt.
+    DBT_INDIRECT_SELECTION: cautious
+    # No calls to external services from the pipeline.
+    DBT_SEND_ANONYMOUS_USAGE_STATS: 'false'
   volumes:
     - ./dags:/opt/airflow/dags:ro
     - ./src:/opt/airflow/src:ro

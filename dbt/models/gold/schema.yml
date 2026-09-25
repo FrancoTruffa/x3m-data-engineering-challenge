@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: product_daily_revenue
+    description: >
+      Revenue per product per day (sparse: a product without sales on a day has no row).
+      Incremental by ingestion watermark against silver.cart_items.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [product_id, date]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "revenue <= gross_revenue"
+    columns:
+      - name: product_id
+        data_tests: [not_null]
+      - name: product_title
+        description: >
+          Catalog title (silver.products) at processing time; falls back to the title in the cart
+          when the product isn't in the catalog.
+        data_tests: [not_null]
+      - name: date
+        description: snapshot_date of the carts, the day the sale was observed.
+        data_tests: [not_null]
+      - name: units_sold
+        description: sum(quantity).
+        data_tests: [not_null]
+      - name: revenue
+        description: Net of discounts, sum(line_discounted_total). What was actually charged.
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: gross_revenue
+        description: Gross, sum(line_total). List price times quantity.
+        data_tests: [not_null]
+      - name: carts_count
+        description: Distinct carts that included the product.
+        data_tests: [not_null]
+      - name: ingested_at
+        description: Latest silver ingested_at of the date (watermark).
+        data_tests: [not_null]

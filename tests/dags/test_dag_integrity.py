@@ -43,11 +43,27 @@ def test_scheduling_flags(dag):
 
 
 def test_tasks_and_dependencies(dag):
-    assert set(dag.task_ids) == {"extract_products", "extract_carts"}
-    for task_id in ("extract_products", "extract_carts"):
-        task = dag.get_task(task_id)
-        assert task.upstream_task_ids == set()
-        assert task.downstream_task_ids == set()
+    # extract_products ─┐
+    #                   ├─→ dbt_build_silver ─→ dbt_build_gold
+    # extract_carts ────┘
+    expected_upstream = {
+        "extract_products": set(),
+        "extract_carts": set(),
+        "dbt_build_silver": {"extract_products", "extract_carts"},
+        "dbt_build_gold": {"dbt_build_silver"},
+    }
+    assert set(dag.task_ids) == set(expected_upstream)
+    for task_id, upstream in expected_upstream.items():
+        assert dag.get_task(task_id).upstream_task_ids == upstream
+
+
+@pytest.mark.parametrize("layer", ["silver", "gold"])
+def test_dbt_tasks_build_their_layer_without_dates(dag, layer):
+    command = dag.get_task(f"dbt_build_{layer}").bash_command
+    assert command.startswith("/opt/dbt-venv/bin/dbt build ")
+    assert f"--selector {layer}" in command
+    # Pending dates come from the ingestion watermark, never from Airflow.
+    assert "--vars" not in command
 
 
 def test_tasks_retry_and_report_failures(dag):

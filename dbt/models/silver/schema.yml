@@ -1,0 +1,86 @@
+version: 2
+
+models:
+  - name: products
+    description: Current state of each product (SCD1), from its latest snapshot in bronze.
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+      - name: title
+        data_tests: [not_null]
+      - name: price
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: snapshot_date
+        description: Last business date on which the product was seen in the source.
+        data_tests: [not_null]
+      - name: ingested_at
+        data_tests: [not_null]
+
+  - name: carts
+    description: >
+      One row per cart per daily snapshot. Incremental by ingestion watermark: dates whose bronze
+      load is newer than `ingested_at` are replaced (delete+insert by snapshot_date).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, cart_id]
+    columns:
+      - name: snapshot_date
+        data_tests: [not_null]
+      - name: cart_id
+        data_tests: [not_null]
+      - name: total
+        data_tests: [not_null]
+      - name: discounted_total
+        data_tests: [not_null]
+      - name: ingested_at
+        description: audit_ingestion_timestamp of the bronze load this row comes from (watermark).
+        data_tests: [not_null]
+
+  - name: cart_items
+    description: >
+      One row per cart line. Same product can appear in several lines of a cart; they are kept
+      apart here for fidelity to the source and consolidated in gold.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, cart_id, line_number]
+    columns:
+      - name: snapshot_date
+        data_tests: [not_null]
+      - name: cart_id
+        data_tests: [not_null]
+      - name: line_number
+        data_tests: [not_null]
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('products')
+                field: product_id
+              config:
+                severity: warn
+      - name: quantity
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+      - name: unit_price
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: line_total
+        data_tests: [not_null]
+      - name: line_discounted_total
+        data_tests: [not_null]
+      - name: ingested_at
+        data_tests: [not_null]

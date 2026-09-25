@@ -15,4 +15,5 @@ pythonpath = ["src"]
 addopts = "-ra -p no:cacheprovider"
 markers = [
     "db: needs a reachable warehouse (WAREHOUSE_* environment variables)",
+    "dbt: runs dbt against a throwaway database in the warehouse (slow)",
 ]

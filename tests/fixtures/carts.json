@@ -1,0 +1,102 @@
+[
+    {
+        "id": 2,
+        "total": 139.93,
+        "userId": 2,
+        "products": [
+            {
+                "id": 86,
+                "price": 19.99,
+                "title": "Man Short Sleeve Shirt",
+                "total": 99.94999999999999,
+                "quantity": 5,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/thumbnail.webp",
+                "discountedTotal": 93.12,
+                "discountPercentage": 6.83
+            },
+            {
+                "id": 104,
+                "price": 19.99,
+                "title": "Apple iPhone Charger",
+                "total": 39.98,
+                "quantity": 2,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/mobile-accessories/apple-iphone-charger/thumbnail.webp",
+                "discountedTotal": 32.58,
+                "discountPercentage": 18.52
+            }
+        ],
+        "totalProducts": 2,
+        "totalQuantity": 7,
+        "discountedTotal": 125.7
+    },
+    {
+        "id": 4,
+        "total": 689.93,
+        "userId": 4,
+        "products": [
+            {
+                "id": 92,
+                "price": 109.99,
+                "title": "Sports Sneakers Off White Red",
+                "total": 329.96999999999997,
+                "quantity": 3,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/thumbnail.webp",
+                "discountedTotal": 329.84,
+                "discountPercentage": 0.04
+            },
+            {
+                "id": 8,
+                "price": 89.99,
+                "title": "Dior J'adore",
+                "total": 359.96,
+                "quantity": 4,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/fragrances/dior-j'adore/thumbnail.webp",
+                "discountedTotal": 306.97,
+                "discountPercentage": 14.72
+            }
+        ],
+        "totalProducts": 2,
+        "totalQuantity": 7,
+        "discountedTotal": 636.81
+    },
+    {
+        "id": 38,
+        "total": 409.95,
+        "userId": 38,
+        "products": [
+            {
+                "id": 110,
+                "price": 14.99,
+                "title": "Selfie Lamp with iPhone",
+                "total": 29.98,
+                "quantity": 2,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/mobile-accessories/selfie-lamp-with-iphone/thumbnail.webp",
+                "discountedTotal": 24.16,
+                "discountPercentage": 19.4
+            },
+            {
+                "id": 161,
+                "price": 349.99,
+                "title": "Samsung Galaxy Tab White",
+                "total": 349.99,
+                "quantity": 1,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/tablets/samsung-galaxy-tab-white/thumbnail.webp",
+                "discountedTotal": 286.29,
+                "discountPercentage": 18.2
+            },
+            {
+                "id": 110,
+                "price": 14.99,
+                "title": "Selfie Lamp with iPhone",
+                "total": 29.98,
+                "quantity": 2,
+                "thumbnail": "https://cdn.dummyjson.com/product-images/mobile-accessories/selfie-lamp-with-iphone/thumbnail.webp",
+                "discountedTotal": 24.16,
+                "discountPercentage": 19.4
+            }
+        ],
+        "totalProducts": 3,
+        "totalQuantity": 5,
+        "discountedTotal": 334.61
+    }
+]

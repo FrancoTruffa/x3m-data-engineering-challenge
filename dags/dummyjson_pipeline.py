@@ -1,17 +1,21 @@
-"""Daily DummyJSON pipeline: products and carts to bronze.
+"""Daily DummyJSON pipeline: products and carts to bronze, then silver and gold with dbt.
 
-Orchestration only; all logic lives in the `ingestion` package (src/ingestion).
+Orchestration only; extraction logic lives in the `ingestion` package (src/ingestion) and
+transformations in the dbt project (dbt/).
 """
 
 from datetime import timedelta
 
 import pendulum
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import CronDataIntervalTimetable, Param, dag, get_current_context, task
 from airflow.sdk.exceptions import AirflowFailException
 
 from ingestion.business_date import resolve_business_date
 from ingestion.logging import on_task_failure
 from ingestion.run import extract_and_load
+
+DBT_BUILD = "/opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector {layer}"
 
 
 @dag(
@@ -27,6 +31,8 @@ from ingestion.run import extract_and_load
     # There's no separate initial load (every run is a full snapshot), so the first scheduled run
     # is a regular, correct one. The platform default stays "paused at creation".
     is_paused_upon_creation=False,
+    # dbt processes pending dates by ingestion watermark (shared state in the warehouse): two
+    # concurrent runs could rebuild the same date in parallel.
     max_active_runs=1,
     params={
         "business_date": Param(
@@ -44,7 +50,7 @@ from ingestion.run import extract_and_load
         "execution_timeout": timedelta(minutes=10),
         "on_failure_callback": on_task_failure,
     },
-    tags=["dummyjson", "bronze"],
+    tags=["dummyjson", "bronze", "dbt"],
 )
 def dummyjson_pipeline():
     @task
@@ -61,8 +67,23 @@ def dummyjson_pipeline():
             process_name=f"{context['dag'].dag_id}.{context['task'].task_id}",
         )
 
-    extract.override(task_id="extract_products")("products")
-    extract.override(task_id="extract_carts")("carts")
+    # dbt reads what's pending from the tables themselves (ingestion watermark): no dates passed.
+    # `build` runs each layer's tests, so a failing silver test stops the run before gold.
+    dbt_build_silver = BashOperator(
+        task_id="dbt_build_silver", bash_command=DBT_BUILD.format(layer="silver")
+    )
+    dbt_build_gold = BashOperator(
+        task_id="dbt_build_gold", bash_command=DBT_BUILD.format(layer="gold")
+    )
+
+    (
+        [
+            extract.override(task_id="extract_products")("products"),
+            extract.override(task_id="extract_carts")("carts"),
+        ]
+        >> dbt_build_silver
+        >> dbt_build_gold
+    )
 
 
 dummyjson_pipeline()

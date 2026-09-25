@@ -3,12 +3,15 @@ FROM apache/airflow:3.3.2-python3.12 AS runtime
 ARG PYTHON_MAJOR_MINOR=3.12
 ARG DBT_VENV=/opt/dbt-venv
 ENV AIRFLOW_CONSTRAINTS_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_MAJOR_MINOR}.txt"
+# dbt packages live in the image: the dbt project directory is bind-mounted read-only.
+ENV DBT_PACKAGES_INSTALL_PATH=/opt/dbt/packages
 
 # Isolated virtualenv for dbt (no --system-site-packages), so dbt's dependencies
 # never conflict with Airflow's.
 USER root
 RUN python -m venv "${DBT_VENV}" \
-    && chown -R airflow:0 "${DBT_VENV}"
+    && mkdir -p /opt/dbt \
+    && chown -R airflow:0 "${DBT_VENV}" /opt/dbt
 
 USER airflow
 
@@ -22,6 +25,12 @@ RUN pip install --no-cache-dir \
 # dbt, fully pinned (including transitive dependencies).
 COPY requirements/dbt.txt /tmp/requirements-dbt.txt
 RUN "${DBT_VENV}/bin/pip" install --no-cache-dir -r /tmp/requirements-dbt.txt
+
+# dbt packages at build time (versions pinned by package-lock.yml), never at runtime.
+COPY --chown=airflow:0 dbt/dbt_project.yml dbt/packages.yml dbt/package-lock.yml /tmp/dbt-deps/
+RUN cd /tmp/dbt-deps \
+    && DBT_LOG_PATH=/tmp/dbt-deps/logs "${DBT_VENV}/bin/dbt" deps \
+    && rm -rf /tmp/dbt-deps
 
 
 # Runtime image + lint/test tooling. Used only by the `tests` compose service.

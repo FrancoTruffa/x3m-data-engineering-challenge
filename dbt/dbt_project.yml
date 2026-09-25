@@ -1,0 +1,17 @@
+name: x3m_pipeline
+version: "1.0.0"
+config-version: 2
+profile: warehouse
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+# Installed at image build time, outside the read-only bind mount of this directory.
+packages-install-path: "{{ env_var('DBT_PACKAGES_INSTALL_PATH', 'dbt_packages') }}"
+
+models:
+  x3m_pipeline:
+    silver:
+      +schema: silver
+    gold:
+      +schema: gold

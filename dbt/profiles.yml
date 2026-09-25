@@ -1,0 +1,15 @@
+# Connection comes from the WAREHOUSE_* environment variables set in docker-compose.yml
+# (local development defaults, not secrets).
+warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_HOST') }}"
+      port: "{{ env_var('WAREHOUSE_PORT') | as_number }}"
+      dbname: "{{ env_var('WAREHOUSE_DB') }}"
+      user: "{{ env_var('WAREHOUSE_USER') }}"
+      password: "{{ env_var('WAREHOUSE_PASSWORD') }}"
+      schema: public
+      threads: 4
+      connect_timeout: 10

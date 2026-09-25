@@ -1,0 +1,20 @@
+# One selector per layer: its models plus its singular tests. Used by the DAG
+# (`dbt build --selector silver`, then `--selector gold`) and by hand.
+# Singular tests are listed by path because, with DBT_INDIRECT_SELECTION=cautious, a test whose
+# parents span two layers (gold vs silver reconciliation) would otherwise never be selected.
+selectors:
+  - name: silver
+    definition:
+      union:
+        - method: path
+          value: models/silver
+        - method: path
+          value: tests/silver
+
+  - name: gold
+    definition:
+      union:
+        - method: path
+          value: models/gold
+        - method: path
+          value: tests/gold

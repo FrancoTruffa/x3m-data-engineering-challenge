@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw DummyJSON snapshots, one row per API record per business date.
+    tables:
+      - name: products
+      - name: carts

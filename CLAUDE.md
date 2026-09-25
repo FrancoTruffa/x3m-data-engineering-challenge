@@ -29,10 +29,21 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
   - `products`: SCD1 por `product_id`, tabla completa.
   - `carts`: grano `(snapshot_date, cart_id)`, incremental `delete+insert` por `snapshot_date`.
   - `cart_items`: grano `(snapshot_date, cart_id, line_number)` usando `jsonb_array_elements ... WITH ORDINALITY`, incremental por `snapshot_date`.
-  - Montos en `numeric(12,2)`.
+  - Montos en `numeric(12,2)`. `ingested_at` = `audit_ingestion_timestamp` de bronze (watermark).
 - **Gold** (dbt): `product_daily_revenue` con grano `(product_id, date)`.
-  - Columnas: `product_id`, `product_title`, `date`, `units_sold`, `revenue` (neto), `gross_revenue`, `carts_count`.
+  - Columnas: `product_id`, `product_title`, `date`, `units_sold`, `revenue` (neto), `gross_revenue`, `carts_count`, `ingested_at` (máximo `ingested_at` de silver por fecha: watermark de gold).
   - Incremental por `date`.
+
+## Procesamiento incremental en dbt: watermark de ingesta (crítico)
+
+- **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. dbt decide qué días procesar leyendo las tablas (macro `pending_dates`):
+  - **Silver:** un día está pendiente si el máximo `audit_ingestion_timestamp` de bronze para ese día es mayor que el `ingested_at` guardado en silver para ese día.
+  - **Gold:** el mismo criterio contra `silver.cart_items`.
+  - Los días pendientes se reemplazan con `delete+insert` por fecha. En el primer build o en un full refresh, todo está pendiente.
+- **Tasks del DAG:** ejecutan `dbt build --selector silver` y `dbt build --selector gold` (`dbt/selectors.yml`). Cada selector incluye los modelos y los tests singulares de su capa. El compose define `DBT_INDIRECT_SELECTION=cautious`, para que el build de silver no corra el test de reconciliación de gold antes de reconstruir gold.
+- **`max_active_runs=1` en el DAG es obligatorio:** el watermark es estado compartido, y dos corridas simultáneas podrían procesar el mismo día en paralelo.
+- **Reparación:** `dbt build --full-refresh`. Es el único mecanismo; no hay override de fechas, y no se debe implementar uno sin acordarlo. Casos que el watermark no detecta y requieren full refresh: un bug corregido en la lógica de silver o gold (bronze no cambió), y una corrección de `audit_logical_date` en bronze (un `UPDATE` no cambia `audit_ingestion_timestamp`).
+- **Efecto sobre `product_title` en gold:** los días ya procesados conservan el título del catálogo vigente cuando se procesaron. Un renombre solo se ve en los días nuevos, o en todos después de un full refresh.
 
 ## Semántica temporal (crítico)
 
@@ -45,7 +56,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
   - **Corrida programada:** fecha de `data_interval_start`.
   - **Corrida manual:** `conf["business_date"]` si viene; si no, el día anterior a `run_after` en UTC. Se rechazan fechas mal formadas o de días que todavía no cerraron.
 - En Airflow 3.3.2, las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. Esto está verificado con triggers reales por REST y por CLI.
-- La fecha de negocio se pasa a dbt con `--vars '{"logical_date": "YYYY-MM-DD"}'`.
+- La fecha de negocio solo decide con qué `audit_logical_date` se carga bronze. dbt no la recibe: la lee de las tablas (ver la sección de watermark).
 
 ## Estructura del repo
 
@@ -74,17 +85,21 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │       ├── logging.py          # logging estructurado (JSON) + on_failure_callback
 │       └── run.py              # extract_and_load: punto de entrada de cada task (config → client → loader → log)
 ├── dbt/
-│   ├── dbt_project.yml
+│   ├── dbt_project.yml         # packages-install-path fuera del bind mount (/opt/dbt/packages)
 │   ├── packages.yml            # dbt_utils con versión exacta
-│   ├── profiles.yml
+│   ├── package-lock.yml        # lock de paquetes; `dbt deps` corre en el build de la imagen
+│   ├── profiles.yml            # lee WAREHOUSE_*
+│   ├── selectors.yml           # selectores `silver` y `gold` (modelos + tests singulares de la capa)
+│   ├── macros/                 # pending_dates (watermark), generate_schema_name
 │   ├── models/
 │   │   ├── sources.yml
 │   │   ├── silver/             # products.sql, carts.sql, cart_items.sql + schema.yml
 │   │   └── gold/               # product_daily_revenue.sql + schema.yml
-│   └── tests/                  # tests singulares de reconciliación
+│   └── tests/                  # tests singulares de reconciliación: silver/, gold/
 ├── tests/
-│   ├── unit/                   # client, loader, business_date
+│   ├── unit/                   # client, loader, business_date, logging, run
 │   ├── dags/                   # integridad del DAG
+│   ├── dbt/                    # integración dbt: watermark, recuperación, full refresh (DB temporal)
 │   └── fixtures/               # products.json, carts.json (incluye casos borde)
 ├── scripts/
 │   └── load_fixtures.py        # carga fixtures en bronze (usado por CI)

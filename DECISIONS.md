@@ -81,11 +81,11 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Carts con historia diaria:** es el hecho y de él sale la fecha de gold. Un upsert solo por `cart_id` pisaría el día anterior y destruiría la historia.
 - **Carts y cart_items separados:** se evita repetir los totales del cart en cada línea y se habilita un control de reconciliación entre la suma de líneas y el total del cart.
 - **Upsert de carts como reemplazo del día completo** (estrategia incremental `delete+insert` por `snapshot_date`) en lugar de un `MERGE` fila por fila. Si en un reintento un cart deja de aparecer, el `MERGE` dejaría la fila vieja huérfana; el reemplazo del día deja el día exactamente igual al último snapshot.
-- **`line_number`:** posición del producto dentro del array del cart (`jsonb_array_elements ... WITH ORDINALITY`). Es necesario porque `(snapshot_date, cart_id, product_id)` **no es único**: en la verificación de la fuente, el cart 7 contiene el producto 56 en dos líneas separadas.
+- **`line_number`:** posición del producto dentro del array del cart (`jsonb_array_elements ... WITH ORDINALITY`). Es necesario porque `(snapshot_date, cart_id, product_id)` **no es único**: en la verificación de la fuente, el cart 7 contiene el producto 56 en dos líneas separadas, y en el snapshot del 24/09 había 12 pares (cart, producto) repetidos sobre 800 líneas.
 - **Líneas duplicadas:** se mantienen separadas en silver por fidelidad al origen (no se puede saber si son un error o líneas legítimas) y se consolidan en gold al agregar.
 - **Montos en `numeric`:** la fuente trae errores de punto flotante (por ejemplo, `99.94999999999999`). Todo lo monetario se castea a `numeric(12,2)`.
 - **Título y precio de venta tomados del cart**, no del catálogo: representan el momento de la venta; el catálogo puede cambiar después.
-- **Materialización:** `carts` y `cart_items` incrementales por día; `products` como tabla completa. Con estos volúmenes todo podría ser full refresh, pero el incremental por día es coherente con el particionado lógico y muestra cómo escalaría. Para 194 productos, un merge no justifica su complejidad.
+- **Materialización:** `carts` y `cart_items` incrementales por día; `products` como tabla completa. Con estos volúmenes todo podría ser full refresh, pero el incremental por día es coherente con el particionado lógico y muestra cómo escalaría. Para 194 productos, un merge no justifica su complejidad. Los días a procesar se detectan por **watermark de ingesta** (ver 1.6): cada fila de silver guarda en `ingested_at` el `audit_ingestion_timestamp` de la carga de bronze de la que viene.
 
 ### 1.5 Gold
 
@@ -100,11 +100,13 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 | `revenue` | **Neto de descuentos** (`sum(line_discounted_total)`): lo efectivamente cobrado |
 | `gross_revenue` | Bruto (`sum(line_total)`): precio de lista × cantidad |
 | `carts_count` | Cantidad de carts distintos que incluyeron el producto |
+| `ingested_at` | Máximo `ingested_at` de `silver.cart_items` para esa fecha: el watermark de gold |
 
 - **`revenue` neto + `gross_revenue`:** el enunciado exige una columna `revenue`; se define como neto por ser lo cobrado y se expone el bruto para visibilizar el descuento. La definición queda documentada en el `schema.yml` de dbt.
-- **Título del catálogo con `left join`:** un único título por producto en toda la historia, sin perder revenue si un producto no está en el catálogo.
+- **Título del catálogo con `left join`:** sin perder revenue si un producto no está en el catálogo (en ese caso se usa el título del cart).
+- **Efecto del incremental sobre `product_title`:** el título se toma del catálogo vigente **al momento de procesar** cada día. Los días ya procesados conservan ese título; si un producto cambia de nombre, el cambio se refleja solo en los días nuevos, salvo que se haga un full refresh, que reescribe toda la historia con el título actual. Un cambio en `silver.products` no dispara el watermark de gold, porque gold solo mira `silver.cart_items`. Es consistente con cómo se procesa cada día y está cubierto por un test.
 - **Tabla dispersa:** un producto sin ventas en un día no tiene fila. Cruzar un calendario con todos los productos multiplicaría filas sin información.
-- **Materialización incremental por `date`**, coherente con silver.
+- **Materialización incremental por `date`**, coherente con silver, con su propio watermark contra `silver.cart_items` (ver 1.6).
 
 ### 1.6 Orquestación y scheduling
 
@@ -129,6 +131,55 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
   - El DAG declara el parámetro `business_date`, así el formulario de trigger de la UI lo muestra.
 
   Una corrida manual con fecha explícita etiqueta con esa fecha los datos que la API expone **hoy**. Sirve para recuperar el día inmediato anterior si falló la corrida programada. Para días más viejos, la advertencia de `catchup` sigue valiendo.
+
+#### Procesamiento incremental por watermark de ingesta (silver y gold)
+
+dbt **no recibe ninguna fecha**: decide qué días procesar leyendo las tablas. Un día está pendiente cuando su última carga en la capa anterior es más nueva que lo ya procesado:
+
+- **Silver:** un `snapshot_date` se reprocesa si el máximo `audit_ingestion_timestamp` de bronze para ese día es mayor que el `ingested_at` guardado en silver para ese día.
+- **Gold:** el mismo criterio contra `silver.cart_items`, con el `ingested_at` máximo de silver por fecha guardado en gold.
+- **Cómo se reemplaza:** los días pendientes se reemplazan completos con `delete+insert` por fecha (macro `pending_dates`).
+- **Cómo se ejecuta:** las tasks del DAG ejecutan `dbt build --selector silver` y `dbt build --selector gold`, sin `--vars`. En el primer build, o en un full refresh, todas las fechas están pendientes.
+
+Resultado en cada situación:
+
+| Situación | Qué procesa dbt |
+|---|---|
+| Corrida programada del D+1 | el día D, recién cargado |
+| Re-corrida manual de un día anterior | solo ese día: su carga en bronze es más nueva que la de silver |
+| Silver falló un día y al siguiente corre bien | los dos días: se recupera solo |
+| `dbt build` a mano sin cargas nuevas | nada |
+
+**Alternativa descartada: pasar la fecha a dbt con `--vars '{"logical_date": ...}'`.**
+- Obligaba a transportar desde Airflow un valor que ya está persistido en bronze (`audit_logical_date`).
+- En las corridas manuales, que no tienen intervalo de datos, había dos malas opciones: duplicar en Jinja la lógica de `resolve_business_date`, o acoplar dbt al resultado (XCom) de una task de extracción.
+- Con watermark, dbt depende solo de las tablas, se recupera automáticamente de días fallidos, y una ejecución manual de dbt procesa lo correcto.
+
+**Costos del watermark:**
+- **El comando del DAG ya no explicita qué día procesa.** Se compensa con los logs de dbt (`INSERT 0 N` por modelo) y con `ingested_at` en silver y gold, que permite rastrear de qué carga viene cada fila.
+- **Requiere serializar las corridas:** el estado es compartido (lo que ya está en silver y gold), y dos corridas simultáneas podrían procesar el mismo día en paralelo. El DAG tiene `max_active_runs=1`.
+- **No hay override de fechas** (`force_dates` o similar). Las reparaciones se hacen con full refresh (ver abajo).
+
+`resolve_business_date` no cambia: sigue decidiendo con qué fecha se carga bronze.
+
+**Selección de tests por capa:** los selectores `silver` y `gold` (`dbt/selectors.yml`) incluyen los modelos y los tests singulares de cada capa, y el compose define `DBT_INDIRECT_SELECTION=cautious`. Con el modo por defecto (*eager*), el build de silver incluía el test de reconciliación gold contra silver y lo corría antes de reconstruir gold, lo que daba un falso error cada vez que llegaba un día nuevo. Con *cautious* solo, ese test no quedaba seleccionado en ningún build; por eso los selectores listan los tests singulares por ruta.
+
+#### Reprocesamiento: `dbt build --full-refresh`
+
+El watermark detecta **cargas nuevas en bronze**. No detecta cambios que no pasan por una carga nueva, y esos casos se reparan con un full refresh, que reconstruye silver y gold completos desde bronze:
+
+```bash
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector silver --full-refresh
+```
+
+```bash
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector gold --full-refresh
+```
+
+- **Bug corregido en la lógica de silver o gold:** bronze no cambió, así que el watermark no marca ningún día como pendiente. El full refresh reprocesa todo con la lógica nueva.
+- **Corrección de etiqueta en bronze:** un `UPDATE` de `audit_logical_date` no cambia `audit_ingestion_timestamp`, así que el watermark tampoco lo detecta, y el día corregido quedaría con los datos viejos en silver. El full refresh lo corrige.
+
+Hay un test que verifica que el full refresh reconstruye silver y gold desde bronze y que el resultado coincide con el incremental.
 
 ### 1.7 Calidad de datos
 
@@ -166,7 +217,11 @@ El warehouse se separa del PostgreSQL de metadata de Airflow: si uno tiene un pr
 - **Astronomer Cosmos:** agrega una dependencia con su propia matriz de compatibilidad sin un beneficio necesario para este alcance.
 - **`DockerOperator` con una imagen de dbt:** requiere montar el socket de Docker, lo que es frágil entre sistemas operativos y tiene implicancias de seguridad.
 
-Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al ejecutar.
+Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al ejecutar:
+- `dbt_utils` 1.4.1, fijado por `package-lock.yml`, versionado.
+- Se instalan en `/opt/dbt/packages` (`packages-install-path`), fuera del directorio del proyecto, porque el proyecto se monta como bind mount de solo lectura y taparía los paquetes instalados adentro.
+
+dbt se invoca sin fechas: cada capa procesa lo pendiente según el watermark de ingesta (ver 1.6).
 
 **Extracción: módulo Python independiente de Airflow**, invocado desde tasks de TaskFlow. Usa `requests` con reintentos, backoff y timeout explícitos, y `psycopg` para la carga transaccional. Al estar desacoplado de Airflow, se puede testear sin levantar el orquestador.
 
@@ -193,6 +248,18 @@ Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al e
 **Dónde corren:** en Docker, con una etapa `dev` del mismo Dockerfile de Airflow (la imagen de runtime más `ruff`, `pytest` y `responses`), expuesta como el servicio `tests` del compose (profile `dev`): `docker compose run --rm tests`. Los tests corren con las mismas versiones que el runtime y no hace falta instalar Python en el host. Los tests del loader corren contra el Postgres del warehouse, cada uno en un schema temporal que se crea y se borra.
 
 **Tests de datos (dbt):** los descritos en 1.7, ejecutados como parte de cada corrida del pipeline. Un test fallido en silver impide construir gold.
+
+**Tests de integración de dbt (`pytest`, con fixtures):** cada test crea una base de datos temporal en el Postgres del warehouse, aplica el mismo SQL de init, carga fixtures en bronze con el loader real y corre dbt con los mismos selectores que el DAG. Escenarios:
+- **Watermark:** después de cargar A y C y construir, se carga B, se recarga A y se vuelve a construir. Se reprocesan exactamente A y B (C no se toca), y un build sin cargas nuevas no procesa nada.
+- **Recuperación:** un día que silver nunca construyó se procesa en el siguiente build, junto con el día nuevo.
+- **Full refresh:** reconstruye silver y gold completos y el resultado coincide con el incremental.
+- **Gold:** consolida líneas duplicadas y usa el título del cart para un producto que no está en el catálogo; ese caso solo genera un warning de integridad referencial.
+- **`product_title`:** el efecto del incremental descrito en 1.5, y cómo lo cambia un full refresh.
+- **Calidad:** un dato roto (el total de un cart que no coincide con sus líneas) hace fallar el build de silver.
+
+Para saber qué días se reprocesaron, los tests comparan `xmin`, la columna de sistema de Postgres que cambia cuando una fila se vuelve a insertar. No hace falta agregar columnas técnicas a los modelos. Los tests se validaron con mutaciones: sin watermark, o comparando con `>=` en lugar de `>`, los escenarios fallan.
+
+**Fixtures** (`tests/fixtures/`): 3 carts y 6 productos reales de la API. Cubren un producto repetido en dos líneas del mismo cart (el 110 en el cart 38), un producto vendido que no está en el catálogo (el 161) y un producto del catálogo sin ventas (el 1).
 
 **CI (GitHub Actions), en cada push:**
 
@@ -229,6 +296,8 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Semántica de schedules cron en Airflow 3 (fase 2).** El diseño (sección 1.6) asumía que la corrida del D+1 cubre el intervalo del día D, como en Airflow 2. El DAG se escribió con el schedule como string cron y los tests unitarios pasaban, porque probaban `resolve_business_date` con un `data_interval_start` que armaba el propio test. El error apareció recién en la primera corrida real: bronze quedó con `audit_logical_date = 2026-09-25` en vez de `2026-09-24`. Consultando la metadata de la corrida se vio que `logical_date`, `data_interval_start` y `data_interval_end` eran iguales, por el nuevo default `create_cron_data_intervals = False`. Se corrigió declarando `CronDataIntervalTimetable`, y se agregó un test de integridad que falla si el DAG vuelve a un timetable sin intervalos. Lección: los tests unitarios validan la lógica contra los supuestos del código; solo la ejecución real valida los supuestos contra la plataforma.
 - **Corridas manuales.** El comportamiento de las corridas manuales (sin `logical_date` ni intervalo) se confirmó con triggers reales por REST y por CLI antes de darlo por cerrado, y no solo con la documentación.
 - **Reintentos inútiles.** La primera verificación con un `business_date` inválido mostró que la task gastaba 3 intentos (unos 6 minutos de backoff) en un error de configuración. Se cambió para que falle en el primer intento.
+- **Fecha de negocio en dbt: de `--vars` a watermark (fase 3).** La propuesta de pasar la fecha a dbt con `--vars` venía del diseño hecho con IA y se replicó sin cuestionarla. Al implementar las tasks de dbt, esa decisión obligaba a transportar la fecha desde Airflow, y la IA propuso agregar una task solo para resolverla. Fui yo quien detectó que el problema lo generaba el requisito mismo, al preguntar por qué dbt no leía la fecha de las tablas, si bronze ya la tenía persistida. De esa pregunta salió el procesamiento por watermark de ingesta (1.6), que simplifica el DAG y además recupera días fallidos.
+- **Tests que no probaban lo que decían.** Un test de reintentos ante `Retry-After` pasaba aunque se cambiara el código a respetar el header. La causa: la librería de mocks HTTP simula los reintentos sin ejecutar nunca la espera. Se detectó con una prueba de mutación (cambiar el código y confirmar que el test falle) y el test se reescribió. Desde entonces, los tests de comportamiento crítico (watermark, `Retry-After`) se validan con mutaciones.
 
 ---
 
@@ -250,4 +319,6 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Confirmar con el negocio la semántica de la fuente:** si la actualización de medianoche cierra el día anterior y si los snapshots son completos o acumulativos.
 - **Si la fuente tuviera historia**, habilitar `catchup` y backfills: la extracción pasaría a ser re-ejecutable y el resto del diseño no cambiaría.
 - **Almacenamiento y cómputo:** bronze en object storage con formato tabular abierto (Iceberg/Delta) particionado por fecha lógica, en lugar de una base relacional local.
+- **Override opcional de fechas (`force_dates`)** para reprocesar días puntuales sin reconstruir todo, manteniendo el watermark como comportamiento por defecto. Hoy la única herramienta de reparación es el full refresh, que con volúmenes grandes sería caro.
+- **Costo de la query de watermark:** en cada corrida agrega bronze completo (`group by audit_logical_date` con `max(audit_ingestion_timestamp)`). Bronze ya tiene un índice por `audit_logical_date`, pero no evita ese recorrido. A escala haría falta un índice compuesto `(audit_logical_date, audit_ingestion_timestamp)`, particionar bronze por fecha, o una tabla de control con una fila por carga, que el watermark consultaría en lugar de bronze.
 - **Alertas a un canal real** (Slack, email, PagerDuty) conectadas al `on_failure_callback`, y métricas del pipeline (registros por corrida, duración, frescura del dato) enviadas a un sistema de monitoreo.

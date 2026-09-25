@@ -1,0 +1,371 @@
+[
+    {
+        "id": 1,
+        "sku": "BEA-ESS-ESS-001",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "5784719087687",
+            "createdAt": "2025-10-09T14:47:01.588Z",
+            "updatedAt": "2026-05-23T11:27:41.868Z"
+        },
+        "tags": [
+            "beauty",
+            "mascara"
+        ],
+        "brand": "Essence",
+        "price": 9.99,
+        "stock": 99,
+        "title": "Essence Mascara Lash Princess",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/beauty/essence-mascara-lash-princess/1.webp"
+        ],
+        "rating": 2.56,
+        "weight": 4,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 3,
+                "comment": "Would not recommend!",
+                "reviewerName": "Eleanor Collins",
+                "reviewerEmail": "eleanor.collins@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Very satisfied!",
+                "reviewerName": "Lucas Gordon",
+                "reviewerEmail": "lucas.gordon@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 5,
+                "comment": "Highly impressed!",
+                "reviewerName": "Eleanor Collins",
+                "reviewerEmail": "eleanor.collins@x.dummyjson.com"
+            }
+        ],
+        "category": "beauty",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/beauty/essence-mascara-lash-princess/thumbnail.webp",
+        "dimensions": {
+            "depth": 22.99,
+            "width": 15.14,
+            "height": 13.08
+        },
+        "description": "The Essence Mascara Lash Princess is a popular mascara known for its volumizing and lengthening effects. Achieve dramatic lashes with this long-lasting and cruelty-free formula.",
+        "returnPolicy": "No return policy",
+        "availabilityStatus": "In Stock",
+        "discountPercentage": 10.48,
+        "shippingInformation": "Ships in 3-5 business days",
+        "warrantyInformation": "1 week warranty",
+        "minimumOrderQuantity": 48
+    },
+    {
+        "id": 8,
+        "sku": "FRA-DIO-DIO-008",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "1445086097250",
+            "createdAt": "2025-11-22T12:24:29.033Z",
+            "updatedAt": "2026-05-11T22:03:20.337Z"
+        },
+        "tags": [
+            "fragrances",
+            "perfumes"
+        ],
+        "brand": "Dior",
+        "price": 89.99,
+        "stock": 98,
+        "title": "Dior J'adore",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/fragrances/dior-j'adore/1.webp",
+            "https://cdn.dummyjson.com/product-images/fragrances/dior-j'adore/2.webp",
+            "https://cdn.dummyjson.com/product-images/fragrances/dior-j'adore/3.webp"
+        ],
+        "rating": 3.8,
+        "weight": 4,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 5,
+                "comment": "Great value for money!",
+                "reviewerName": "Nicholas Bailey",
+                "reviewerEmail": "nicholas.bailey@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Great value for money!",
+                "reviewerName": "Penelope Harper",
+                "reviewerEmail": "penelope.harper@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Great product!",
+                "reviewerName": "Emma Miller",
+                "reviewerEmail": "emma.miller@x.dummyjson.com"
+            }
+        ],
+        "category": "fragrances",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/fragrances/dior-j'adore/thumbnail.webp",
+        "dimensions": {
+            "depth": 11.83,
+            "width": 27.67,
+            "height": 28.28
+        },
+        "description": "J'adore by Dior is a luxurious and floral fragrance, known for its blend of ylang-ylang, rose, and jasmine. It embodies femininity and sophistication.",
+        "returnPolicy": "7 days return policy",
+        "availabilityStatus": "In Stock",
+        "discountPercentage": 14.72,
+        "shippingInformation": "Ships in 2 weeks",
+        "warrantyInformation": "1 week warranty",
+        "minimumOrderQuantity": 10
+    },
+    {
+        "id": 86,
+        "sku": "MEN-CAS-SHO-086",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "9995865660204",
+            "createdAt": "2025-09-18T04:56:35.819Z",
+            "updatedAt": "2025-12-16T17:45:09.379Z"
+        },
+        "tags": [
+            "clothing",
+            "men's shirts"
+        ],
+        "brand": "Casual Comfort",
+        "price": 19.99,
+        "stock": 2,
+        "title": "Man Short Sleeve Shirt",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/1.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/2.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/3.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/4.webp"
+        ],
+        "rating": 2.9,
+        "weight": 2,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 5,
+                "comment": "Highly recommended!",
+                "reviewerName": "Charlotte Lopez",
+                "reviewerEmail": "charlotte.lopez@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 2,
+                "comment": "Poor quality!",
+                "reviewerName": "Ellie Stewart",
+                "reviewerEmail": "ellie.stewart@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 1,
+                "comment": "Would not recommend!",
+                "reviewerName": "Sadie Morales",
+                "reviewerEmail": "sadie.morales@x.dummyjson.com"
+            }
+        ],
+        "category": "mens-shirts",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/mens-shirts/man-short-sleeve-shirt/thumbnail.webp",
+        "dimensions": {
+            "depth": 9.6,
+            "width": 5.02,
+            "height": 16.57
+        },
+        "description": "The Man Short Sleeve Shirt is a breezy and stylish option for warm days. With a comfortable fit and short sleeves, it's perfect for a laid-back yet polished look.",
+        "returnPolicy": "30 days return policy",
+        "availabilityStatus": "Low Stock",
+        "discountPercentage": 6.83,
+        "shippingInformation": "Ships in 2 weeks",
+        "warrantyInformation": "3 year warranty",
+        "minimumOrderQuantity": 4
+    },
+    {
+        "id": 92,
+        "sku": "MEN-OFF-SPO-092",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "0430266023617",
+            "createdAt": "2025-10-23T21:40:02.101Z",
+            "updatedAt": "2026-07-08T08:17:41.089Z"
+        },
+        "tags": [
+            "footwear",
+            "casual shoes"
+        ],
+        "brand": "Off White",
+        "price": 109.99,
+        "stock": 62,
+        "title": "Sports Sneakers Off White Red",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/1.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/2.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/3.webp",
+            "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/4.webp"
+        ],
+        "rating": 4.69,
+        "weight": 9,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Excellent quality!",
+                "reviewerName": "Aurora Lawson",
+                "reviewerEmail": "aurora.lawson@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 5,
+                "comment": "Great value for money!",
+                "reviewerName": "Gabriel Mitchell",
+                "reviewerEmail": "gabriel.mitchell@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 1,
+                "comment": "Not worth the price!",
+                "reviewerName": "Eli Bennett",
+                "reviewerEmail": "eli.bennett@x.dummyjson.com"
+            }
+        ],
+        "category": "mens-shoes",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/thumbnail.webp",
+        "dimensions": {
+            "depth": 28.5,
+            "width": 21.43,
+            "height": 9.86
+        },
+        "description": "Another variant of the Sports Sneakers in Off White Red, featuring a unique design. These sneakers offer style and comfort for casual occasions.",
+        "returnPolicy": "60 days return policy",
+        "availabilityStatus": "In Stock",
+        "discountPercentage": 0.04,
+        "shippingInformation": "Ships overnight",
+        "warrantyInformation": "3 months warranty",
+        "minimumOrderQuantity": 3
+    },
+    {
+        "id": 104,
+        "sku": "MOB-APP-APP-104",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "0879776541417",
+            "createdAt": "2025-08-18T18:08:42.395Z",
+            "updatedAt": "2026-07-16T18:55:42.348Z"
+        },
+        "tags": [
+            "electronics",
+            "chargers"
+        ],
+        "brand": "Apple",
+        "price": 19.99,
+        "stock": 31,
+        "title": "Apple iPhone Charger",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/mobile-accessories/apple-iphone-charger/1.webp",
+            "https://cdn.dummyjson.com/product-images/mobile-accessories/apple-iphone-charger/2.webp"
+        ],
+        "rating": 4.15,
+        "weight": 1,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 1,
+                "comment": "Very disappointed!",
+                "reviewerName": "Sadie Morales",
+                "reviewerEmail": "sadie.morales@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 5,
+                "comment": "Great product!",
+                "reviewerName": "Lily Torres",
+                "reviewerEmail": "lily.torres@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 2,
+                "comment": "Waste of money!",
+                "reviewerName": "Luke Cooper",
+                "reviewerEmail": "luke.cooper@x.dummyjson.com"
+            }
+        ],
+        "category": "mobile-accessories",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/mobile-accessories/apple-iphone-charger/thumbnail.webp",
+        "dimensions": {
+            "depth": 5.95,
+            "width": 13.63,
+            "height": 26.25
+        },
+        "description": "The Apple iPhone Charger is a high-quality charger designed for fast and efficient charging of your iPhone. Ensure your device stays powered up and ready to go.",
+        "returnPolicy": "90 days return policy",
+        "availabilityStatus": "In Stock",
+        "discountPercentage": 18.52,
+        "shippingInformation": "Ships in 2 weeks",
+        "warrantyInformation": "1 year warranty",
+        "minimumOrderQuantity": 14
+    },
+    {
+        "id": 110,
+        "sku": "MOB-GAD-SEL-110",
+        "meta": {
+            "qrCode": "https://cdn.dummyjson.com/public/qr-code.png",
+            "barcode": "4372781189895",
+            "createdAt": "2026-06-15T22:22:09.910Z",
+            "updatedAt": "2026-06-26T06:36:37.699Z"
+        },
+        "tags": [
+            "electronics",
+            "selfie accessories"
+        ],
+        "brand": "GadgetMaster",
+        "price": 14.99,
+        "stock": 58,
+        "title": "Selfie Lamp with iPhone",
+        "images": [
+            "https://cdn.dummyjson.com/product-images/mobile-accessories/selfie-lamp-with-iphone/1.webp"
+        ],
+        "rating": 3.55,
+        "weight": 10,
+        "reviews": [
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Highly recommended!",
+                "reviewerName": "Luke Cooper",
+                "reviewerEmail": "luke.cooper@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 3,
+                "comment": "Poor quality!",
+                "reviewerName": "Caleb Perkins",
+                "reviewerEmail": "caleb.perkins@x.dummyjson.com"
+            },
+            {
+                "date": "2025-04-30T09:41:02.053Z",
+                "rating": 4,
+                "comment": "Highly recommended!",
+                "reviewerName": "Benjamin Wilson",
+                "reviewerEmail": "benjamin.wilson@x.dummyjson.com"
+            }
+        ],
+        "category": "mobile-accessories",
+        "thumbnail": "https://cdn.dummyjson.com/product-images/mobile-accessories/selfie-lamp-with-iphone/thumbnail.webp",
+        "dimensions": {
+            "depth": 22.83,
+            "width": 5.26,
+            "height": 13.84
+        },
+        "description": "The Selfie Lamp with iPhone is a portable and adjustable LED light designed to enhance your selfies and video calls. Attach it to your iPhone for well-lit photos.",
+        "returnPolicy": "60 days return policy",
+        "availabilityStatus": "In Stock",
+        "discountPercentage": 19.4,
+        "shippingInformation": "Ships in 2 weeks",
+        "warrantyInformation": "Lifetime warranty",
+        "minimumOrderQuantity": 22
+    }
+]
