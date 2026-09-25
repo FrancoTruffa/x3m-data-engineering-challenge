@@ -157,6 +157,16 @@ Las dependencias de dbt (`dbt deps`) se instalan al construir la imagen, no al e
 
 **Versiones fijas:** imágenes con tag exacto, Airflow instalado con su archivo de *constraints* oficial y dependencias Python pineadas.
 
+- Airflow `3.3.2` (`apache/airflow:3.3.2-python3.12`) y PostgreSQL `16.15-bookworm` en ambos contenedores (la misma major que el compose oficial).
+- El venv de dbt se fija con un lock completo (`pip freeze`, incluidas las dependencias transitivas) en `requirements/dbt.txt`.
+
+**Detalles del compose** (partiendo del `docker-compose.yaml` oficial de 3.3.2):
+
+- **Componentes:** metadata DB, warehouse, `airflow-init`, api-server, scheduler y dag-processor. Con `LocalExecutor` las tasks corren dentro del scheduler, así que no hacen falta Redis, workers ni Flower. **Sin triggerer**, porque no hay tasks diferibles; el health de la API lo reporta como `null`.
+- **Autenticación:** `FabAuthManager`, igual que el compose oficial. Usuario `airflow`/`airflow`, valor por defecto de desarrollo.
+- **Sin `.env` obligatorio:** todos los valores tienen default en el compose. El código (`dags/`, `src/`, `dbt/`) se monta como bind mount de solo lectura; los logs de Airflow van a un volumen nombrado y los artefactos de dbt a `/tmp`. Como nada escribe sobre el host, no hace falta configurar `AIRFLOW_UID` en Linux.
+- **Puertos del host poco comunes por default:** UI en `18080` (`AIRFLOW_PORT`) y warehouse en `15432` (`WAREHOUSE_PORT`). La base de metadata no se expone. Los puertos habituales (`8080`, `5432`, `5433`) suelen estar ocupados por otros servicios de desarrollo; con puertos altos y fijos, levantar el proyecto sigue siendo `docker compose up` y la URL del README no cambia. En el caso improbable de que choquen, se cambian con una variable de entorno sin editar archivos. Se descartaron dos alternativas: el puerto aleatorio asignado por Docker, porque obliga a consultar la URL en cada arranque, y un script que busque un puerto libre, porque suma un punto de falla que depende del sistema operativo.
+
 ### 1.9 Testing, CI y observabilidad
 
 **Tests unitarios (`pytest`):**

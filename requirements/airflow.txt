@@ -1,0 +1,5 @@
+# Runtime dependencies installed into Airflow's Python environment.
+# Installed together with the official Airflow constraints file (see docker/airflow/Dockerfile);
+# pins match constraints-3.3.2/constraints-3.12.txt.
+requests==2.34.2
+psycopg[binary]==3.3.5

@@ -1,0 +1,3 @@
+# Only requirements/ is needed in the build context; code is bind-mounted at runtime.
+*
+!requirements/
