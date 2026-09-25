@@ -26,7 +26,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
   - Columnas: `id`, `data` (`jsonb` crudo), `audit_event_timestamp`, `audit_ingestion_timestamp` (un valor único por carga de cada entidad), `audit_logical_date` (la fecha de negocio resuelta; no siempre es la `logical_date` de Airflow), `audit_process_name`.
   - Carga idempotente: `DELETE WHERE audit_logical_date = D` + `INSERT` en una transacción.
 - **Silver** (dbt):
-  - `products`: SCD1 por `product_id`, tabla completa.
+  - `products`: SCD1 por `product_id`, incremental `delete+insert` por `product_id`: el snapshot más reciente por producto dentro del lote (recuperación con varios días pendientes); los productos ausentes conservan su último estado. Sin lógica de "no retroceder": la guarda de la extracción impide cargar días viejos.
   - `carts`: grano `(snapshot_date, cart_id)`, incremental `delete+insert` por `snapshot_date`.
   - `cart_items`: grano `(snapshot_date, cart_id, line_number)` usando `jsonb_array_elements ... WITH ORDINALITY`, incremental por `snapshot_date`.
   - Montos en `numeric(12,2)`. `ingested_at` = `audit_ingestion_timestamp` de bronze (watermark).
@@ -36,9 +36,9 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 
 ## Procesamiento incremental en dbt: watermark de ingesta (crítico)
 
-- **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. El incremental es el patrón estándar de dbt: dentro de `is_incremental()`, filtrar `audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity') from {{ this }})` (en gold, `ingested_at` de `silver.cart_items`), con `delete+insert` y `unique_key` = fecha.
+- **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. El incremental es el patrón estándar de dbt: dentro de `is_incremental()`, filtrar `audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity') from {{ this }})` (en gold, `ingested_at` de `silver.cart_items`), con `delete+insert` y `unique_key` = fecha (o `product_id` en products).
   - No calcular días pendientes en un paso previo: cada carga de bronze reemplaza un día completo con un único timestamp, así que las filas nuevas son días completos, y `delete+insert` reemplaza esos días.
-  - Nunca agregar bronze completa en una corrida incremental. Índices: `bronze.carts(audit_ingestion_timestamp)` y `ingested_at` en silver y gold (config `indexes`).
+  - **Todos los modelos de silver y gold son incrementales.** Nunca agregar bronze completa en una corrida incremental; solo el full refresh la recorre. Índices: `audit_ingestion_timestamp` en `bronze.products` y `bronze.carts`, y la columna de watermark en silver y gold (config `indexes`).
   - **Supuesto:** los timestamps de ingesta crecen en el mismo orden que los commits de las cargas. Se cumple porque hay un solo escritor (el DAG) y `max_active_runs=1`. No cargar bronze desde otros procesos en paralelo.
 - **Tasks del DAG:** ejecutan `dbt build --selector silver` y `dbt build --selector gold` (`dbt/selectors.yml`). Cada selector incluye los modelos y los tests singulares de su capa. El compose define `DBT_INDIRECT_SELECTION=cautious`, para que el build de silver no corra el test de reconciliación de gold antes de reconstruir gold.
 - **`max_active_runs=1` en el DAG es obligatorio:** el watermark es estado compartido, y dos corridas simultáneas podrían procesar el mismo día en paralelo.
@@ -52,9 +52,11 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
   - La expresión cron es la misma; lo que cambia es cómo interpreta Airflow 3 la corrida. Un string cron se interpreta como `CronTriggerTimetable` (porque `create_cron_data_intervals = False` por default): la corrida es un disparo sin intervalo, y `logical_date = data_interval_start = run_after`. Con eso, la corrida del 25/09 00:30 etiquetaría como 25/09 los datos del 24/09.
   - `CronDataIntervalTimetable` hace que la corrida del D+1 00:30 cubra el intervalo [D 00:30, D+1 00:30), así que `data_interval_start` es el día D.
   - Verificado con una corrida real (DECISIONS 1.6). El test de integridad del DAG falla si el timetable no es `CronDataIntervalTimetable`.
-- La fecha de negocio se resuelve con una función pura `resolve_business_date(context)`:
+- La fecha de negocio se resuelve con una función pura `resolve_business_date(context)`, **sin parámetros para elegirla** (no existe `conf["business_date"]`; no reintroducirlo):
   - **Corrida programada:** fecha de `data_interval_start`.
-  - **Corrida manual:** `conf["business_date"]` si viene; si no, el día anterior a `run_after` en UTC. Se rechazan fechas mal formadas o de días que todavía no cerraron.
+  - **Cualquier otra corrida (manual, disparada):** el día anterior a `run_after` en UTC.
+- **Guarda (crítico):** antes de extraer, `ensure_business_date_is_last_closed_day` exige que la fecha de negocio sea el día anterior al momento real de ejecución (UTC), para cualquier tipo de corrida; si no, `AirflowFailException` (sin reintentos). La API no tiene historia: cualquier otra fecha etiquetaría mal los datos. Bloquea *Clear* de corridas viejas, backfills, corridas programadas que ejecutan después de la medianoche siguiente y el arranque entre 00:00 y 00:30 UTC.
+  - Consecuencia: bronze solo recibe cargas del día recién cerrado; la única re-carga legítima es el reintento del mismo día. No agregar lógica defensiva aguas abajo para re-cargas de días viejos: el escenario está prohibido. Si se viola por fuera del DAG, se repara con full refresh.
 - En Airflow 3.3.2, las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. Esto está verificado con triggers reales por REST y por CLI.
 - La fecha de negocio solo decide con qué `audit_logical_date` se carga bronze. dbt no la recibe: la lee de las tablas (ver la sección de watermark).
 
@@ -81,7 +83,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │       ├── config.py           # config por entidad (endpoint, clave de datos, campo de event ts)
 │       ├── client.py           # cliente HTTP paginado con reintentos y validación de total
 │       ├── loader.py           # carga idempotente a bronze
-│       ├── business_date.py    # resolve_business_date
+│       ├── business_date.py    # resolve_business_date + guarda del último día cerrado
 │       ├── logging.py          # logging estructurado (JSON) + on_failure_callback
 │       └── run.py              # extract_and_load: punto de entrada de cada task (config → client → loader → log)
 ├── dbt/

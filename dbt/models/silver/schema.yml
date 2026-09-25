@@ -2,7 +2,9 @@ version: 2
 
 models:
   - name: products
-    description: Current state of each product (SCD1), from its latest snapshot in bronze.
+    description: >
+      Current state of each product (SCD1). Incremental by ingestion watermark: products in the
+      new bronze loads are replaced with their most recent snapshot; the rest keep their state.
     columns:
       - name: product_id
         data_tests: [unique, not_null]
@@ -15,9 +17,10 @@ models:
               arguments:
                 min_value: 0
       - name: snapshot_date
-        description: Last business date on which the product was seen in the source.
+        description: Business date of the snapshot the current state comes from.
         data_tests: [not_null]
       - name: ingested_at
+        description: audit_ingestion_timestamp of the bronze load the current state comes from (watermark).
         data_tests: [not_null]
 
   - name: carts

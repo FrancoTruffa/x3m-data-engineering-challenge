@@ -28,26 +28,28 @@ def silver_cart_counts(warehouse):
 
 def test_reprocesses_exactly_the_days_with_new_loads(warehouse):
     load_day(warehouse, DAY_A, ts(1))
-    load_day(warehouse, DAY_C, ts(1))
+    warehouse.build()
+    load_day(warehouse, DAY_B, ts(2))
     warehouse.build()
     first = warehouse.row_versions()
-    assert silver_cart_counts(warehouse) == {DAY_A: 3, DAY_C: 3}
+    assert silver_cart_counts(warehouse) == {DAY_A: 3, DAY_B: 3}
 
-    # New day B, and day A re-loaded with one cart less. Day C gets no new load.
-    load_day(warehouse, DAY_B, ts(2))
-    load_day(warehouse, DAY_A, ts(3), carts=CARTS[:2])
+    # Day B retried (the only legitimate reload: same day), now with one cart less; then day C.
+    # Day A gets no new load.
+    load_day(warehouse, DAY_B, ts(3), carts=CARTS[:2])
+    load_day(warehouse, DAY_C, ts(4))
     warehouse.build()
     second = warehouse.row_versions()
 
     for table, _ in INCREMENTAL_MODELS:
-        assert reprocessed_dates(first, second)[table] == {DAY_A, DAY_B}, table
-    assert silver_cart_counts(warehouse) == {DAY_A: 2, DAY_B: 3, DAY_C: 3}
+        assert reprocessed_dates(first, second)[table] == {DAY_B, DAY_C}, table
+    assert silver_cart_counts(warehouse) == {DAY_A: 3, DAY_B: 2, DAY_C: 3}
     assert dict(
         warehouse.rows("select snapshot_date, max(ingested_at) from silver.carts group by 1")
     ) == {
-        DAY_A: ts(3),
-        DAY_B: ts(2),
-        DAY_C: ts(1),
+        DAY_A: ts(1),
+        DAY_B: ts(3),
+        DAY_C: ts(4),
     }
 
     # Nothing new in bronze: nothing is reprocessed.
@@ -86,7 +88,7 @@ def test_full_refresh_rebuilds_everything_and_matches_incremental(warehouse):
     load_day(warehouse, DAY_A, ts(1))
     warehouse.build()
     load_day(warehouse, DAY_B, ts(2))
-    load_day(warehouse, DAY_A, ts(3), carts=CARTS[:2])
+    load_day(warehouse, DAY_B, ts(3), carts=CARTS[:2])  # retry of the same day
     warehouse.build()
     load_day(warehouse, DAY_C, ts(4))
     warehouse.build()

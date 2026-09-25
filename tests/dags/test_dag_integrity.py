@@ -42,6 +42,11 @@ def test_scheduling_flags(dag):
     assert dag.max_active_runs == 1
 
 
+def test_no_business_date_parameter(dag):
+    # The API has no history: a run can only load the last closed day, never a chosen one.
+    assert "business_date" not in dag.params
+
+
 def test_tasks_and_dependencies(dag):
     # extract_products ─┐
     #                   ├─→ dbt_build_silver ─→ dbt_build_gold

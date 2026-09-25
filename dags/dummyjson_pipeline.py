@@ -4,14 +4,17 @@ Orchestration only; extraction logic lives in the `ingestion` package (src/inges
 transformations in the dbt project (dbt/).
 """
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import CronDataIntervalTimetable, Param, dag, get_current_context, task
+from airflow.sdk import CronDataIntervalTimetable, dag, get_current_context, task
 from airflow.sdk.exceptions import AirflowFailException
 
-from ingestion.business_date import resolve_business_date
+from ingestion.business_date import (
+    ensure_business_date_is_last_closed_day,
+    resolve_business_date,
+)
 from ingestion.logging import on_task_failure
 from ingestion.run import extract_and_load
 
@@ -34,13 +37,6 @@ DBT_BUILD = "/opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --select
     # dbt processes pending dates by ingestion watermark (shared state in the warehouse): two
     # concurrent runs could rebuild the same date in parallel.
     max_active_runs=1,
-    params={
-        "business_date": Param(
-            None,
-            type=["null", "string"],
-            description="Manual runs only: day to load (YYYY-MM-DD). Defaults to yesterday (UTC).",
-        ),
-    },
     default_args={
         "retries": 2,
         "retry_delay": timedelta(minutes=2),
@@ -56,10 +52,13 @@ def dummyjson_pipeline():
     @task
     def extract(entity: str) -> dict:
         context = get_current_context()
+        business_date = resolve_business_date(context)
         try:
-            business_date = resolve_business_date(context)
+            # The API only exposes the last closed day: any other date would mislabel its data
+            # (clear of an old run, late scheduled run, start between 00:00 and 00:30 UTC).
+            ensure_business_date_is_last_closed_day(business_date, datetime.now(UTC))
         except ValueError as exc:
-            # Invalid run configuration: retrying can't fix it, fail without retries.
+            # Retrying can't fix it: fail without retries.
             raise AirflowFailException(str(exc)) from exc
         return extract_and_load(
             entity,

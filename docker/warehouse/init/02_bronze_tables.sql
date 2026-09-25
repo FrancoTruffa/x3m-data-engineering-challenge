@@ -25,6 +25,6 @@ create table if not exists bronze.carts (
 create index if not exists products_audit_logical_date_idx on bronze.products (audit_logical_date);
 create index if not exists carts_audit_logical_date_idx on bronze.carts (audit_logical_date);
 
--- dbt incremental watermark: silver reads only rows ingested after its latest ingested_at.
--- (silver.products is a full table rebuild, so bronze.products doesn't need it.)
+-- dbt incremental watermark: silver reads only rows ingested after its watermark.
+create index if not exists products_audit_ingestion_timestamp_idx on bronze.products (audit_ingestion_timestamp);
 create index if not exists carts_audit_ingestion_timestamp_idx on bronze.carts (audit_ingestion_timestamp);

@@ -43,7 +43,7 @@ Una tabla por entidad: `bronze.products` y `bronze.carts`. **Un registro de la A
 | `data` | JSON crudo completo (`jsonb`), sin modificar |
 | `audit_event_timestamp` | Timestamp de última modificación provisto por el sistema origen, cuando está disponible (`meta.updatedAt` en products; `null` en carts, porque la fuente no lo provee) |
 | `audit_ingestion_timestamp` | Momento en que el pipeline procesó el dato. Un único valor por carga de cada entidad (se toma justo antes de insertar), para que un snapshot nunca quede partido entre dos timestamps. Products y carts se cargan en tasks separadas, así que cada uno tiene su propio valor |
-| `audit_logical_date` | Día al que pertenece el dato: la **fecha de negocio** resuelta por `resolve_business_date` (ver 1.6). En corridas programadas coincide con la fecha lógica de Airflow (`data_interval_start`); en corridas manuales Airflow no tiene fecha lógica, y el valor sale de `conf["business_date"]` o del día anterior a `run_after` |
+| `audit_logical_date` | Día al que pertenece el dato: la **fecha de negocio** resuelta por `resolve_business_date` (ver 1.6). En corridas programadas coincide con la fecha lógica de Airflow (`data_interval_start`); en corridas manuales Airflow no tiene fecha lógica, y el valor es el día anterior a `run_after`. En cualquier caso, la guarda de la extracción exige que sea el último día cerrado al momento de ejecutar |
 | `audit_process_name` | Proceso que realizó la ingesta (`dag_id.task_id`), para trazabilidad |
 
 **Por qué tres fechas y no dos.** Cada una responde una pregunta distinta:
@@ -54,7 +54,7 @@ Una tabla por entidad: `bronze.products` y `bronze.carts`. **Un registro de la A
 | `audit_ingestion_timestamp` | ¿Cuándo lo procesamos? | El reloj, al ejecutar |
 | `audit_logical_date` | ¿A qué día pertenece? | Airflow, al programar la corrida (o quien dispara una corrida manual) |
 
-En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar el dato en el tiempo, y la fecha lógica no hace falta. Acá la fuente no provee ninguna fecha para carts, y con la interpretación de "día cerrado" la fecha del dato (D) y la de ejecución (D+1) caen **siempre** en días distintos. Derivar la fecha de negocio de `audit_ingestion_timestamp` requeriría una regla implícita (`- 1 día`) acoplada al horario de ejecución, que se rompería en silencio si cambiara el schedule. `audit_logical_date` hace explícita esa relación y no cambia con reintentos ni reruns. La única excepción es la corrida manual sin fecha explícita: ahí se usa el día anterior a `run_after` como default, porque Airflow no provee otra referencia. Es una regla visible, documentada y testeada en un único lugar (`resolve_business_date`), no una convención repartida aguas abajo.
+En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar el dato en el tiempo, y la fecha lógica no hace falta. Acá la fuente no provee ninguna fecha para carts, y con la interpretación de "día cerrado" la fecha del dato (D) y la de ejecución (D+1) caen **siempre** en días distintos. Derivar la fecha de negocio de `audit_ingestion_timestamp` requeriría una regla implícita (`- 1 día`) acoplada al horario de ejecución, que se rompería en silencio si cambiara el schedule. `audit_logical_date` hace explícita esa relación y no cambia con reintentos ni reruns. La única excepción es la corrida manual: ahí se usa el día anterior a `run_after`, porque Airflow no provee otra referencia. Es una regla visible, documentada y testeada en un único lugar (`resolve_business_date`), no una convención repartida aguas abajo.
 
 **Decisiones adicionales:**
 
@@ -85,7 +85,13 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Líneas duplicadas:** se mantienen separadas en silver por fidelidad al origen (no se puede saber si son un error o líneas legítimas) y se consolidan en gold al agregar.
 - **Montos en `numeric`:** la fuente trae errores de punto flotante (por ejemplo, `99.94999999999999`). Todo lo monetario se castea a `numeric(12,2)`.
 - **Título y precio de venta tomados del cart**, no del catálogo: representan el momento de la venta; el catálogo puede cambiar después.
-- **Materialización:** `carts` y `cart_items` incrementales por día; `products` como tabla completa. Con estos volúmenes todo podría ser full refresh, pero el incremental por día es coherente con el particionado lógico y muestra cómo escalaría. Para 194 productos, un merge no justifica su complejidad. Los días a procesar se detectan por **watermark de ingesta** (ver 1.6): cada fila de silver guarda en `ingested_at` el `audit_ingestion_timestamp` de la carga de bronze de la que viene.
+- **Materialización: todo incremental por watermark de ingesta** (ver 1.6). Cada fila de silver guarda en `ingested_at` el `audit_ingestion_timestamp` de la carga de bronze de la que viene.
+  - **`carts` y `cart_items`:** reemplazan días completos (`delete+insert` por `snapshot_date`).
+  - **`products`:** reemplaza productos (`delete+insert` por `product_id`). Al principio se había decidido como tabla completa ("para 194 productos, un merge no justifica su complejidad"). El argumento miraba el tamaño de un snapshot, pero no que bronze acumula 194 filas por día: la reconstrucción completa leía toda la historia de bronze en cada corrida.
+- **SCD1 incremental de `products`:** igual que carts, lee de bronze solo las filas cargadas después del máximo `ingested_at` y reemplaza esos productos (`delete+insert` por `product_id`).
+  - **El más reciente dentro del lote:** si hay varios días pendientes en un mismo build (recuperación), gana el snapshot más reciente por producto (`row_number` por `snapshot_date desc, ingested_at desc`).
+  - **Productos que dejan de aparecer:** conservan su último estado conocido, porque no vienen en el lote.
+  - **No hace falta defenderse de re-cargas de días viejos:** la guarda de la extracción garantiza que bronze solo recibe el día recién cerrado (ver 1.6). Una carga más nueva siempre es un snapshot más nuevo.
 
 ### 1.5 Gold
 
@@ -114,8 +120,8 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Alineación con la semántica de Airflow:** la corrida que se ejecuta el día D+1 a las 00:30 cubre el intervalo que empieza el día D. La fecha lógica coincide con la fecha de negocio sin transformaciones adicionales.
 - **Timetable explícito (`CronDataIntervalTimetable`), hallazgo de Airflow 3:** en Airflow 3, `[scheduler] create_cron_data_intervals` es `False` por default, así que un schedule cron escrito como string (`"30 0 * * *"`) se interpreta como `CronTriggerTimetable`: **no hay intervalo de datos** y `logical_date`, `data_interval_start`, `data_interval_end` y `run_after` valen lo mismo, el momento del disparo. Se detectó en la primera corrida real: la corrida del 25/09 00:30 cargó bronze con `audit_logical_date = 2026-09-25`, cuando por la semántica de "día cerrado" esos datos son del 24/09. El punto anterior asumía el comportamiento de Airflow 2. Por eso el DAG declara `schedule=CronDataIntervalTimetable("30 0 * * *", timezone="UTC")`: la corrida del D+1 00:30 tiene intervalo [D 00:30, D+1 00:30) y `logical_date = D`, y así vuelve a valer la alineación sin reglas implícitas de "-1 día". Verificado con una corrida real (`logical_date` y `data_interval_start` = 24/09, bronze con `audit_logical_date = 2026-09-24`) y cubierto por el test de integridad del DAG, que falla si el timetable no es de intervalos.
 - **`catchup=False`:** la API no tiene historia. Un backfill capturaría los datos de hoy y los etiquetaría con fechas pasadas: datos incorrectos que parecen correctos. La extracción no es re-ejecutable hacia atrás; las transformaciones sí, desde bronze.
-- **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Limitación conocida:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo cerrado es el de anteayer, y esa primera corrida etiquetaría con esa fecha los datos del día recién cerrado. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
-- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Los errores de configuración de la corrida (un `business_date` inválido) fallan sin reintentos (`AirflowFailException`), porque reintentar no los corrige. Las tasks de dbt tienen **un solo reintento**: cubre errores transitorios de conexión con el warehouse, y un test de datos que falla es determinístico, así que más reintentos solo demorarían la falla (con 2 reintentos y backoff, unos 6 minutos).
+- **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Caso borde:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo completo es el de anteayer. La guarda de la extracción hace fallar esa corrida en lugar de etiquetar mal los datos (ver "Guarda de la fecha de negocio"); a las 00:30 corre la del día correcto. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
+- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Una fecha de negocio que no es el último día cerrado falla sin reintentos (`AirflowFailException`), porque reintentar no la corrige. Las tasks de dbt tienen **un solo reintento**: cubre errores transitorios de conexión con el warehouse, y un test de datos que falla es determinístico, así que más reintentos solo demorarían la falla (con 2 reintentos y backoff, unos 6 minutos).
 - **Toda espera tiene tope:**
   - Timeout por request HTTP (5 s de conexión y 30 s de lectura).
   - `connect_timeout` de 10 s hacia Postgres.
@@ -125,12 +131,28 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
   El motivo es que, con `max_active_runs=1`, una task colgada bloquearía la corrida del día siguiente, y como la fuente no tiene historia, ese día se perdería. Una falla rápida es recuperable; una task colgada en silencio, no.
 - **Una extracción fallida no toca bronze:** se descarga el snapshot completo y se valida antes de abrir la conexión a la base. Si la API falla a mitad de camino, el `DELETE` del día nunca se ejecuta y la carga anterior queda intacta. Lo cubre un test.
 - **Fallas visibles:** un `on_failure_callback` registra un log estructurado con el DAG, la task, la fecha de negocio y el error. No se conectan canales externos (Slack, email) porque requerirían credenciales, que el enunciado excluye.
-- **Corridas manuales:** verificado con triggers reales (REST API, que es la que usa la UI, y CLI) en Airflow 3.3.2: las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`. `resolve_business_date` resuelve la fecha así:
-  - Corrida programada: fecha de `data_interval_start`, en UTC.
-  - Cualquier otra corrida (manual o disparada desde otro DAG): `conf["business_date"]` si viene (formato `YYYY-MM-DD`); si no, el día anterior a `run_after` en UTC. Se rechazan fechas mal formadas y días que todavía no cerraron (`>=` la fecha de `run_after`), porque la fuente todavía no los expone.
-  - El DAG declara el parámetro `business_date`, así el formulario de trigger de la UI lo muestra.
+- **Resolución de la fecha de negocio** (`resolve_business_date`). Verificado con triggers reales (REST API, que es la que usa la UI, y CLI) en Airflow 3.3.2: las corridas manuales llegan con `logical_date = None` y `data_interval = None`; solo traen `run_after`.
+  - **Corrida programada:** fecha de `data_interval_start`, en UTC.
+  - **Cualquier otra corrida** (manual o disparada desde otro DAG): el día anterior a `run_after`, en UTC.
+  - **No hay parámetro para elegir la fecha.** Se eliminó `conf["business_date"]` (ver "Guarda de la fecha de negocio").
 
-  Una corrida manual con fecha explícita etiqueta con esa fecha los datos que la API expone **hoy**. Sirve para recuperar el día inmediato anterior si falló la corrida programada. Para días más viejos, la advertencia de `catchup` sigue valiendo.
+#### Guarda de la fecha de negocio
+
+La API no tiene historia: lo que devuelve pertenece siempre al **último día cerrado**, el día anterior al momento real de ejecución en UTC. Cargar con cualquier otra fecha etiquetaría esos datos con un día que no es el suyo. Por eso, antes de extraer, la task exige `fecha de negocio == día anterior a ahora (UTC)`, para **cualquier tipo de corrida**. Si no coincide, falla sin reintentos (`AirflowFailException`); reintentar no cambia la fecha.
+
+| Situación | Resultado |
+|---|---|
+| Corrida programada en horario (D+1 00:30) | pasa: carga D |
+| Corrida programada demorada, pero antes de la medianoche siguiente | pasa: la API sigue exponiendo D |
+| Corrida programada que ejecuta después de la medianoche siguiente | falla: la API ya expone D+1 |
+| *Clear* de una corrida vieja, o un backfill | falla |
+| Corrida manual | pasa: carga el día anterior a su disparo |
+| Corrida manual disparada antes de medianoche que ejecuta después | falla |
+| Stack levantado entre las 00:00 y las 00:30 UTC (el intervalo completo es el de anteayer) | falla, en lugar de etiquetar mal; a las 00:30 corre la del día correcto |
+
+Verificado con corridas reales: la programada y una manual pasan, y una corrida de un intervalo viejo (creada con `airflow backfill create`) falla en el primer intento sin tocar bronze, con el `task_failed` del callback indicando la fecha rechazada.
+
+**Consecuencia:** la única re-carga legítima de un día es el reintento de ese mismo día, dentro de su ventana. **Supuesto documentado:** bronze solo recibe cargas del día recién cerrado, y la guarda lo garantiza para todo lo que pasa por el DAG. Si se viola por fuera del DAG (una carga manual directa a bronze o un `UPDATE` de fechas), se repara con full refresh (ver "Reprocesamiento").
 
 #### Procesamiento incremental por watermark de ingesta (silver y gold)
 
@@ -141,9 +163,10 @@ where audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity'
 ```
 
 - **Silver** (`carts`, `cart_items`): lee de bronze solo las filas con `audit_ingestion_timestamp` posterior al máximo `ingested_at` que ya tiene.
+- **Silver `products`:** el mismo filtro, con reemplazo por `product_id` y el snapshot más reciente por producto dentro del lote (ver 1.4).
 - **Gold:** el mismo filtro contra `silver.cart_items`.
 - **Por qué alcanza con filtrar filas, sin calcular antes qué días procesar:** el loader reemplaza el día completo en bronze con un único timestamp por carga. Entonces las filas nuevas son **snapshots completos** de los días que cambiaron. `delete+insert` con `unique_key` = fecha borra de la tabla destino los días que vienen en el lote y los reinserta: dbt deduce qué días reemplazar a partir del contenido del lote. En silver, todas las líneas de un día comparten el mismo `ingested_at`, así que gold recibe días completos igual.
-- **Lectura acotada:** `bronze.carts` tiene un índice por `audit_ingestion_timestamp`, y silver y gold tienen un índice por `ingested_at` (config `indexes` de dbt). La consulta del máximo lee una sola entrada del índice, y bronze se lee solo en el rango nuevo; está verificado con `EXPLAIN`. Solo el full refresh recorre todo.
+- **Lectura acotada:** `bronze.products` y `bronze.carts` tienen un índice por `audit_ingestion_timestamp`. Silver y gold tienen índices por su columna de watermark (config `indexes` de dbt), y `silver.products` además un índice único por `product_id`. La consulta del máximo lee una sola entrada del índice, y bronze se lee solo en el rango nuevo; está verificado con `EXPLAIN`. Solo el full refresh recorre todo.
 - **Cómo se ejecuta:** las tasks del DAG corren `dbt build --selector silver` y `dbt build --selector gold`, sin `--vars`. En el primer build, o en un full refresh, se procesa todo.
 - **Supuesto que lo hace correcto:** los timestamps de ingesta crecen en el mismo orden en que se confirman las cargas. Si una carga tomara su timestamp, tardara en hacer commit y en el medio dbt procesara otra más nueva, la primera quedaría por debajo del watermark y no se procesaría. Acá no puede pasar: hay un solo escritor (el DAG), `max_active_runs=1`, y dbt corre después de las extracciones. Cargar bronze desde otro proceso en paralelo rompería el supuesto.
 
@@ -154,7 +177,7 @@ Resultado en cada situación:
 | Situación | Qué procesa dbt |
 |---|---|
 | Corrida programada del D+1 | el día D, recién cargado |
-| Re-corrida manual de un día anterior | solo ese día: su carga en bronze es más nueva que la de silver |
+| Reintento del mismo día (por ejemplo, después de una falla parcial) | ese día, con la carga nueva |
 | Silver falló un día y al siguiente corre bien | los dos días: se recupera solo |
 | `dbt build` a mano sin cargas nuevas | nada |
 
@@ -164,7 +187,7 @@ Resultado en cada situación:
 - Con watermark, dbt depende solo de las tablas, se recupera automáticamente de días fallidos, y una ejecución manual de dbt procesa lo correcto.
 
 **Alternativa descartada: estrategia `microbatch` de dbt (1.9+).** Es la opción más nativa: dbt parte el trabajo en lotes diarios, los itera y reintenta cada lote por separado. Pero decide qué procesar por una **ventana de tiempo relativa al momento de ejecución** (por ejemplo, los últimos N días), no por lo que se cargó:
-- una re-carga manual de un día fuera de la ventana no se detecta;
+- un día que silver no procesó y quedó fuera de la ventana no se recupera;
 - los días dentro de la ventana se reprocesan en cada corrida aunque no hayan cambiado.
 
 Encaja con fuentes que tienen timestamp de evento; con días que se reemplazan completos, el watermark de ingesta es más preciso.
@@ -192,6 +215,7 @@ docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir 
 
 - **Bug corregido en la lógica de silver o gold:** bronze no cambió, así que el watermark no marca ningún día como pendiente. El full refresh reprocesa todo con la lógica nueva.
 - **Corrección de etiqueta en bronze:** un `UPDATE` de `audit_logical_date` no cambia `audit_ingestion_timestamp`, así que el watermark tampoco lo detecta, y el día corregido quedaría con los datos viejos en silver. El full refresh lo corrige.
+- **Cargas a bronze por fuera del DAG** que violen el supuesto de la guarda (por ejemplo, un día viejo cargado después de uno más nuevo): el incremental podría dejar en `silver.products` un estado más viejo que el vigente. El full refresh recalcula todo desde bronze.
 
 Hay un test que verifica que el full refresh reconstruye silver y gold desde bronze y que el resultado coincide con el incremental.
 
@@ -270,8 +294,21 @@ dbt se invoca sin fechas: cada capa procesa lo pendiente según el watermark de 
 - **Gold:** consolida líneas duplicadas y usa el título del cart para un producto que no está en el catálogo; ese caso solo genera un warning de integridad referencial.
 - **`product_title`:** el efecto del incremental descrito en 1.5, y cómo lo cambia un full refresh.
 - **Calidad:** un dato roto (el total de un cart que no coincide con sus líneas) hace fallar el build de silver.
+- **SCD1 de `products`:**
+  - un snapshot más nuevo actualiza el producto;
+  - con dos días pendientes en el mismo build gana el más reciente;
+  - un producto que desaparece conserva su último estado;
+  - solo se reescriben los productos que vienen en el lote;
+  - el full refresh coincide con el incremental.
 
-Para saber qué días se reprocesaron, los tests comparan `xmin`, la columna de sistema de Postgres que cambia cuando una fila se vuelve a insertar. No hace falta agregar columnas técnicas a los modelos. Los tests se validaron con mutaciones: sin watermark, o comparando con `>=` en lugar de `>`, los escenarios fallan.
+Los escenarios cargan los días en el orden que garantiza la guarda: cada día después del anterior, y la única re-carga es el reintento del mismo día.
+
+**Guarda de la fecha de negocio (unitarios):** corrida programada en horario y demorada dentro del día, corrida programada después de la medianoche siguiente, *Clear* de una corrida vieja, arranque entre las 00:00 y las 00:30, corrida manual, y corrida manual que cruza la medianoche.
+
+Para saber qué días o productos se reprocesaron, los tests comparan `xmin`, la columna de sistema de Postgres que cambia cuando una fila se vuelve a insertar. No hace falta agregar columnas técnicas a los modelos. Los tests se validaron con mutaciones y fallan en cada caso:
+- **Filtro de watermark:** sin el filtro, o comparando con `>=` en lugar de `>`.
+- **`products`:** con el orden de recencia invertido, o sin el filtro incremental.
+- **Guarda:** desactivada, o rechazando solo fechas futuras.
 
 **Fixtures** (`tests/fixtures/`): 3 carts y 6 productos reales de la API. Cubren un producto repetido en dos líneas del mismo cart (el 110 en el cart 38), un producto vendido que no está en el catálogo (el 161) y un producto del catálogo sin ventas (el 1).
 
@@ -309,9 +346,12 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 
 - **Semántica de schedules cron en Airflow 3 (fase 2).** El diseño (sección 1.6) asumía que la corrida del D+1 cubre el intervalo del día D, como en Airflow 2. El DAG se escribió con el schedule como string cron y los tests unitarios pasaban, porque probaban `resolve_business_date` con un `data_interval_start` que armaba el propio test. El error apareció recién en la primera corrida real: bronze quedó con `audit_logical_date = 2026-09-25` en vez de `2026-09-24`. Consultando la metadata de la corrida se vio que `logical_date`, `data_interval_start` y `data_interval_end` eran iguales, por el nuevo default `create_cron_data_intervals = False`. Se corrigió declarando `CronDataIntervalTimetable`, y se agregó un test de integridad que falla si el DAG vuelve a un timetable sin intervalos. Lección: los tests unitarios validan la lógica contra los supuestos del código; solo la ejecución real valida los supuestos contra la plataforma.
 - **Corridas manuales.** El comportamiento de las corridas manuales (sin `logical_date` ni intervalo) se confirmó con triggers reales por REST y por CLI antes de darlo por cerrado, y no solo con la documentación.
-- **Reintentos inútiles.** La primera verificación con un `business_date` inválido mostró que la task gastaba 3 intentos (unos 6 minutos de backoff) en un error de configuración. Se cambió para que falle en el primer intento.
+- **Reintentos inútiles.** La primera verificación con un `business_date` inválido (en ese momento existía el parámetro) mostró que la task gastaba 3 intentos (unos 6 minutos de backoff) en un error de configuración. Se cambió para que falle en el primer intento.
 - **Fecha de negocio en dbt: de `--vars` a watermark (fase 3).** La propuesta de pasar la fecha a dbt con `--vars` venía del diseño hecho con IA y se replicó sin cuestionarla. Al implementar las tasks de dbt, esa decisión obligaba a transportar la fecha desde Airflow, y la IA propuso agregar una task solo para resolverla. Fui yo quien detectó que el problema lo generaba el requisito mismo, al preguntar por qué dbt no leía la fecha de las tablas, si bronze ya la tenía persistida. De esa pregunta salió el procesamiento por watermark de ingesta (1.6), que simplifica el DAG y además recupera días fallidos.
 - **Recorrido completo de bronze en cada corrida.** La primera implementación del watermark comparaba día por día, lo que obligaba a agregar bronze completa en cada corrida para detectar los días pendientes. Lo detecté al revisar la propuesta: en mi experiencia, un proceso incremental solo lee su ventana, y un recorrido completo corresponde a una carga completa. También cuestioné si hacía falta calcular los días en un paso previo en lugar de delegarle el incremental a dbt. Se reemplazó por el filtro idiomático de `is_incremental()` sobre el timestamp de ingesta, con índices (verificado con `EXPLAIN`), y se eliminó la macro. Se evaluó `microbatch` y se descartó (1.6).
+- **`silver.products` había quedado afuera.** Al aplicar el watermark a carts y gold, `products` siguió como tabla completa, y leía toda la historia de bronze en cada corrida. Lo detecté preguntando por qué no se había modificado. Además, la IA había escrito en CLAUDE.md la regla "nunca agregar bronze completa" mientras dejaba un modelo que la violaba.
+- **Defender un escenario que había que prohibir.** Para `products` incremental, la IA propuso una condición de "no retroceder" (unir el lote con las filas actuales) y una columna extra (`watermark_ingested_at`), para tolerar la re-carga de un día viejo después de procesar uno más nuevo. Se llegó a implementar y testear. Al revisarlo, vi que ese escenario era en sí un error: sin historia en la API, re-cargar "el 23" el día 25 trae los datos del 24 etiquetados como 23. Lo correcto era prohibirlo en la extracción, no tolerarlo aguas abajo. Se revirtieron la condición y la columna, y se agregó la guarda de la fecha de negocio (1.6). Lección: antes de agregar lógica defensiva, preguntar si el caso que defiende debería existir.
+- **Eliminación de `conf["business_date"]`.** El parámetro para elegir la fecha de una corrida manual parecía una flexibilidad útil (recuperar un día), pero reabría el problema que `catchup=False` cierra: etiquetar con una fecha pasada los datos de hoy. Se eliminó; las corridas manuales siempre cargan el último día cerrado.
 - **Tests que no probaban lo que decían.** Un test de reintentos ante `Retry-After` pasaba aunque se cambiara el código a respetar el header. La causa: la librería de mocks HTTP simula los reintentos sin ejecutar nunca la espera. Se detectó con una prueba de mutación (cambiar el código y confirmar que el test falle) y el test se reescribió. Desde entonces, los tests de comportamiento crítico (watermark, `Retry-After`) se validan con mutaciones.
 
 ---
