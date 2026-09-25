@@ -4,21 +4,24 @@
         incremental_strategy='delete+insert',
         unique_key='date',
         on_schema_change='fail',
+        indexes=[{'columns': ['ingested_at']}],
     )
 }}
 
--- Revenue per product per day. Same watermark as silver, against silver.cart_items: a date is
--- rebuilt when its silver lines were ingested after the ingested_at stored here.
+-- Revenue per product per day.
+-- Incremental by ingestion watermark against silver.cart_items: only lines ingested after the
+-- latest ingested_at already here are read. All lines of a day share one ingested_at (they come
+-- from a single bronze load), so those are complete days, replaced with delete+insert on date.
 -- product_title comes from the catalog at processing time; already processed dates keep it until
 -- they're reprocessed (see DECISIONS.md).
-with pending as (
-    {{ pending_dates(ref('cart_items'), 'snapshot_date', 'ingested_at', 'date') }}
-),
-
-items as (
-    select i.*
-    from {{ ref('cart_items') }} as i
-    inner join pending as p on i.snapshot_date = p.pending_date
+with items as (
+    select *
+    from {{ ref('cart_items') }}
+    {% if is_incremental() %}
+    where ingested_at > (
+        select coalesce(max(ingested_at), '-infinity'::timestamptz) from {{ this }}
+    )
+    {% endif %}
 )
 
 select

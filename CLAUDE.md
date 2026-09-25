@@ -36,10 +36,10 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 
 ## Procesamiento incremental en dbt: watermark de ingesta (crítico)
 
-- **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. dbt decide qué días procesar leyendo las tablas (macro `pending_dates`):
-  - **Silver:** un día está pendiente si el máximo `audit_ingestion_timestamp` de bronze para ese día es mayor que el `ingested_at` guardado en silver para ese día.
-  - **Gold:** el mismo criterio contra `silver.cart_items`.
-  - Los días pendientes se reemplazan con `delete+insert` por fecha. En el primer build o en un full refresh, todo está pendiente.
+- **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. El incremental es el patrón estándar de dbt: dentro de `is_incremental()`, filtrar `audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity') from {{ this }})` (en gold, `ingested_at` de `silver.cart_items`), con `delete+insert` y `unique_key` = fecha.
+  - No calcular días pendientes en un paso previo: cada carga de bronze reemplaza un día completo con un único timestamp, así que las filas nuevas son días completos, y `delete+insert` reemplaza esos días.
+  - Nunca agregar bronze completa en una corrida incremental. Índices: `bronze.carts(audit_ingestion_timestamp)` y `ingested_at` en silver y gold (config `indexes`).
+  - **Supuesto:** los timestamps de ingesta crecen en el mismo orden que los commits de las cargas. Se cumple porque hay un solo escritor (el DAG) y `max_active_runs=1`. No cargar bronze desde otros procesos en paralelo.
 - **Tasks del DAG:** ejecutan `dbt build --selector silver` y `dbt build --selector gold` (`dbt/selectors.yml`). Cada selector incluye los modelos y los tests singulares de su capa. El compose define `DBT_INDIRECT_SELECTION=cautious`, para que el build de silver no corra el test de reconciliación de gold antes de reconstruir gold.
 - **`max_active_runs=1` en el DAG es obligatorio:** el watermark es estado compartido, y dos corridas simultáneas podrían procesar el mismo día en paralelo.
 - **Reparación:** `dbt build --full-refresh`. Es el único mecanismo; no hay override de fechas, y no se debe implementar uno sin acordarlo. Casos que el watermark no detecta y requieren full refresh: un bug corregido en la lógica de silver o gold (bronze no cambió), y una corrección de `audit_logical_date` en bronze (un `UPDATE` no cambia `audit_ingestion_timestamp`).
@@ -90,7 +90,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │   ├── package-lock.yml        # lock de paquetes; `dbt deps` corre en el build de la imagen
 │   ├── profiles.yml            # lee WAREHOUSE_*
 │   ├── selectors.yml           # selectores `silver` y `gold` (modelos + tests singulares de la capa)
-│   ├── macros/                 # pending_dates (watermark), generate_schema_name
+│   ├── macros/                 # generate_schema_name (schemas silver/gold sin prefijo)
 │   ├── models/
 │   │   ├── sources.yml
 │   │   ├── silver/             # products.sql, carts.sql, cart_items.sql + schema.yml

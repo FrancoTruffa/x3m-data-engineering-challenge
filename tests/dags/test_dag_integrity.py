@@ -67,7 +67,15 @@ def test_dbt_tasks_build_their_layer_without_dates(dag, layer):
 
 
 def test_tasks_retry_and_report_failures(dag):
+    # Extraction: API failures are often transient. dbt: one retry for connection errors; a
+    # failing data test is deterministic.
+    expected_retries = {
+        "extract_products": 2,
+        "extract_carts": 2,
+        "dbt_build_silver": 1,
+        "dbt_build_gold": 1,
+    }
     for task in dag.tasks:
-        assert task.retries == 2
+        assert task.retries == expected_retries[task.task_id]
         assert task.execution_timeout == timedelta(minutes=10)
         assert on_task_failure in task.on_failure_callback

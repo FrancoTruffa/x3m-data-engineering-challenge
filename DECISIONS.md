@@ -115,7 +115,7 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Timetable explícito (`CronDataIntervalTimetable`), hallazgo de Airflow 3:** en Airflow 3, `[scheduler] create_cron_data_intervals` es `False` por default, así que un schedule cron escrito como string (`"30 0 * * *"`) se interpreta como `CronTriggerTimetable`: **no hay intervalo de datos** y `logical_date`, `data_interval_start`, `data_interval_end` y `run_after` valen lo mismo, el momento del disparo. Se detectó en la primera corrida real: la corrida del 25/09 00:30 cargó bronze con `audit_logical_date = 2026-09-25`, cuando por la semántica de "día cerrado" esos datos son del 24/09. El punto anterior asumía el comportamiento de Airflow 2. Por eso el DAG declara `schedule=CronDataIntervalTimetable("30 0 * * *", timezone="UTC")`: la corrida del D+1 00:30 tiene intervalo [D 00:30, D+1 00:30) y `logical_date = D`, y así vuelve a valer la alineación sin reglas implícitas de "-1 día". Verificado con una corrida real (`logical_date` y `data_interval_start` = 24/09, bronze con `audit_logical_date = 2026-09-24`) y cubierto por el test de integridad del DAG, que falla si el timetable no es de intervalos.
 - **`catchup=False`:** la API no tiene historia. Un backfill capturaría los datos de hoy y los etiquetaría con fechas pasadas: datos incorrectos que parecen correctos. La extracción no es re-ejecutable hacia atrás; las transformaciones sí, desde bronze.
 - **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Limitación conocida:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo cerrado es el de anteayer, y esa primera corrida etiquetaría con esa fecha los datos del día recién cerrado. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
-- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Los errores de configuración de la corrida (un `business_date` inválido) fallan sin reintentos (`AirflowFailException`), porque reintentar no los corrige.
+- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Los errores de configuración de la corrida (un `business_date` inválido) fallan sin reintentos (`AirflowFailException`), porque reintentar no los corrige. Las tasks de dbt tienen **un solo reintento**: cubre errores transitorios de conexión con el warehouse, y un test de datos que falla es determinístico, así que más reintentos solo demorarían la falla (con 2 reintentos y backoff, unos 6 minutos).
 - **Toda espera tiene tope:**
   - Timeout por request HTTP (5 s de conexión y 30 s de lectura).
   - `connect_timeout` de 10 s hacia Postgres.
@@ -134,12 +134,20 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 
 #### Procesamiento incremental por watermark de ingesta (silver y gold)
 
-dbt **no recibe ninguna fecha**: decide qué días procesar leyendo las tablas. Un día está pendiente cuando su última carga en la capa anterior es más nueva que lo ya procesado:
+dbt **no recibe ninguna fecha**: el incremental lo resuelve con el patrón estándar de dbt, un filtro dentro de `is_incremental()` más la estrategia `delete+insert`. La ventana es "todo lo cargado después de lo último que ya se procesó":
 
-- **Silver:** un `snapshot_date` se reprocesa si el máximo `audit_ingestion_timestamp` de bronze para ese día es mayor que el `ingested_at` guardado en silver para ese día.
-- **Gold:** el mismo criterio contra `silver.cart_items`, con el `ingested_at` máximo de silver por fecha guardado en gold.
-- **Cómo se reemplaza:** los días pendientes se reemplazan completos con `delete+insert` por fecha (macro `pending_dates`).
-- **Cómo se ejecuta:** las tasks del DAG ejecutan `dbt build --selector silver` y `dbt build --selector gold`, sin `--vars`. En el primer build, o en un full refresh, todas las fechas están pendientes.
+```sql
+where audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity') from {{ this }})
+```
+
+- **Silver** (`carts`, `cart_items`): lee de bronze solo las filas con `audit_ingestion_timestamp` posterior al máximo `ingested_at` que ya tiene.
+- **Gold:** el mismo filtro contra `silver.cart_items`.
+- **Por qué alcanza con filtrar filas, sin calcular antes qué días procesar:** el loader reemplaza el día completo en bronze con un único timestamp por carga. Entonces las filas nuevas son **snapshots completos** de los días que cambiaron. `delete+insert` con `unique_key` = fecha borra de la tabla destino los días que vienen en el lote y los reinserta: dbt deduce qué días reemplazar a partir del contenido del lote. En silver, todas las líneas de un día comparten el mismo `ingested_at`, así que gold recibe días completos igual.
+- **Lectura acotada:** `bronze.carts` tiene un índice por `audit_ingestion_timestamp`, y silver y gold tienen un índice por `ingested_at` (config `indexes` de dbt). La consulta del máximo lee una sola entrada del índice, y bronze se lee solo en el rango nuevo; está verificado con `EXPLAIN`. Solo el full refresh recorre todo.
+- **Cómo se ejecuta:** las tasks del DAG corren `dbt build --selector silver` y `dbt build --selector gold`, sin `--vars`. En el primer build, o en un full refresh, se procesa todo.
+- **Supuesto que lo hace correcto:** los timestamps de ingesta crecen en el mismo orden en que se confirman las cargas. Si una carga tomara su timestamp, tardara en hacer commit y en el medio dbt procesara otra más nueva, la primera quedaría por debajo del watermark y no se procesaría. Acá no puede pasar: hay un solo escritor (el DAG), `max_active_runs=1`, y dbt corre después de las extracciones. Cargar bronze desde otro proceso en paralelo rompería el supuesto.
+
+La primera versión comparaba **día por día** (el último timestamp de cada día en bronze contra el de silver). Funcionaba igual, pero agregaba bronze completa en cada corrida para detectar los días pendientes, y necesitaba un paso previo (macro `pending_dates`). El filtro global es la forma idiomática de dbt y lee solo lo nuevo.
 
 Resultado en cada situación:
 
@@ -154,6 +162,12 @@ Resultado en cada situación:
 - Obligaba a transportar desde Airflow un valor que ya está persistido en bronze (`audit_logical_date`).
 - En las corridas manuales, que no tienen intervalo de datos, había dos malas opciones: duplicar en Jinja la lógica de `resolve_business_date`, o acoplar dbt al resultado (XCom) de una task de extracción.
 - Con watermark, dbt depende solo de las tablas, se recupera automáticamente de días fallidos, y una ejecución manual de dbt procesa lo correcto.
+
+**Alternativa descartada: estrategia `microbatch` de dbt (1.9+).** Es la opción más nativa: dbt parte el trabajo en lotes diarios, los itera y reintenta cada lote por separado. Pero decide qué procesar por una **ventana de tiempo relativa al momento de ejecución** (por ejemplo, los últimos N días), no por lo que se cargó:
+- una re-carga manual de un día fuera de la ventana no se detecta;
+- los días dentro de la ventana se reprocesan en cada corrida aunque no hayan cambiado.
+
+Encaja con fuentes que tienen timestamp de evento; con días que se reemplazan completos, el watermark de ingesta es más preciso.
 
 **Costos del watermark:**
 - **El comando del DAG ya no explicita qué día procesa.** Se compensa con los logs de dbt (`INSERT 0 N` por modelo) y con `ingested_at` en silver y gold, que permite rastrear de qué carga viene cada fila.
@@ -297,6 +311,7 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Corridas manuales.** El comportamiento de las corridas manuales (sin `logical_date` ni intervalo) se confirmó con triggers reales por REST y por CLI antes de darlo por cerrado, y no solo con la documentación.
 - **Reintentos inútiles.** La primera verificación con un `business_date` inválido mostró que la task gastaba 3 intentos (unos 6 minutos de backoff) en un error de configuración. Se cambió para que falle en el primer intento.
 - **Fecha de negocio en dbt: de `--vars` a watermark (fase 3).** La propuesta de pasar la fecha a dbt con `--vars` venía del diseño hecho con IA y se replicó sin cuestionarla. Al implementar las tasks de dbt, esa decisión obligaba a transportar la fecha desde Airflow, y la IA propuso agregar una task solo para resolverla. Fui yo quien detectó que el problema lo generaba el requisito mismo, al preguntar por qué dbt no leía la fecha de las tablas, si bronze ya la tenía persistida. De esa pregunta salió el procesamiento por watermark de ingesta (1.6), que simplifica el DAG y además recupera días fallidos.
+- **Recorrido completo de bronze en cada corrida.** La primera implementación del watermark comparaba día por día, lo que obligaba a agregar bronze completa en cada corrida para detectar los días pendientes. Lo detecté al revisar la propuesta: en mi experiencia, un proceso incremental solo lee su ventana, y un recorrido completo corresponde a una carga completa. También cuestioné si hacía falta calcular los días en un paso previo en lugar de delegarle el incremental a dbt. Se reemplazó por el filtro idiomático de `is_incremental()` sobre el timestamp de ingesta, con índices (verificado con `EXPLAIN`), y se eliminó la macro. Se evaluó `microbatch` y se descartó (1.6).
 - **Tests que no probaban lo que decían.** Un test de reintentos ante `Retry-After` pasaba aunque se cambiara el código a respetar el header. La causa: la librería de mocks HTTP simula los reintentos sin ejecutar nunca la espera. Se detectó con una prueba de mutación (cambiar el código y confirmar que el test falle) y el test se reescribió. Desde entonces, los tests de comportamiento crítico (watermark, `Retry-After`) se validan con mutaciones.
 
 ---
@@ -320,5 +335,5 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Si la fuente tuviera historia**, habilitar `catchup` y backfills: la extracción pasaría a ser re-ejecutable y el resto del diseño no cambiaría.
 - **Almacenamiento y cómputo:** bronze en object storage con formato tabular abierto (Iceberg/Delta) particionado por fecha lógica, en lugar de una base relacional local.
 - **Override opcional de fechas (`force_dates`)** para reprocesar días puntuales sin reconstruir todo, manteniendo el watermark como comportamiento por defecto. Hoy la única herramienta de reparación es el full refresh, que con volúmenes grandes sería caro.
-- **Costo de la query de watermark:** en cada corrida agrega bronze completo (`group by audit_logical_date` con `max(audit_ingestion_timestamp)`). Bronze ya tiene un índice por `audit_logical_date`, pero no evita ese recorrido. A escala haría falta un índice compuesto `(audit_logical_date, audit_ingestion_timestamp)`, particionar bronze por fecha, o una tabla de control con una fila por carga, que el watermark consultaría en lugar de bronze.
+- **Garantizar el supuesto del watermark con varios escritores:** si bronze se cargara desde más de un proceso en paralelo, los timestamps de ingesta dejarían de ser monótonos respecto del commit (ver 1.6). Haría falta un número de secuencia asignado al confirmar cada carga, por ejemplo en una tabla de control, o un margen de reprocesamiento sobre el watermark.
 - **Alertas a un canal real** (Slack, email, PagerDuty) conectadas al `on_failure_callback`, y métricas del pipeline (registros por corrida, duración, frescura del dato) enviadas a un sistema de monitoreo.

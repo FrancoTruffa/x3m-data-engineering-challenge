@@ -69,11 +69,13 @@ def dummyjson_pipeline():
 
     # dbt reads what's pending from the tables themselves (ingestion watermark): no dates passed.
     # `build` runs each layer's tests, so a failing silver test stops the run before gold.
+    # One retry only: it covers transient connection errors, while a failing data test is
+    # deterministic and more retries would just delay the failure.
     dbt_build_silver = BashOperator(
-        task_id="dbt_build_silver", bash_command=DBT_BUILD.format(layer="silver")
+        task_id="dbt_build_silver", bash_command=DBT_BUILD.format(layer="silver"), retries=1
     )
     dbt_build_gold = BashOperator(
-        task_id="dbt_build_gold", bash_command=DBT_BUILD.format(layer="gold")
+        task_id="dbt_build_gold", bash_command=DBT_BUILD.format(layer="gold"), retries=1
     )
 
     (
