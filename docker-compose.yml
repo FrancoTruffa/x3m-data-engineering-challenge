@@ -69,7 +69,7 @@ services:
       POSTGRES_PASSWORD: warehouse
       POSTGRES_DB: warehouse
     ports:
-      - "${WAREHOUSE_PORT:-15432}:5432"
+      - "127.0.0.1:${WAREHOUSE_PORT:-15432}:5432"
     volumes:
       - warehouse-data:/var/lib/postgresql/data
       - ./docker/warehouse/init:/docker-entrypoint-initdb.d:ro
@@ -99,7 +99,7 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "${AIRFLOW_PORT:-18080}:8080"
+      - "127.0.0.1:${AIRFLOW_PORT:-18080}:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s

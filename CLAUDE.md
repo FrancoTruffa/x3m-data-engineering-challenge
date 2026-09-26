@@ -15,7 +15,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 
 ## Stack
 
-- **Apache Airflow 3** con `LocalExecutor`. Verificá la última versión estable 3.x al momento de implementar y fijala.
+- **Apache Airflow 3.3.2** (fijado; no actualizar sin acordarlo) con `LocalExecutor`.
 - **PostgreSQL** en dos contenedores: metadata de Airflow y `warehouse` (datos del pipeline).
 - **dbt-core + dbt-postgres** en un **virtualenv aislado dentro de la imagen de Airflow**, invocado con `BashOperator`. No usar Cosmos ni `DockerOperator`.
 - **Extracción en Python puro** (`requests` + reintentos/backoff/timeout, `psycopg`), en un paquete independiente de Airflow, llamado desde tasks de TaskFlow.
