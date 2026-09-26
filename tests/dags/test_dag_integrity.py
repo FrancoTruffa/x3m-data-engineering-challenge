@@ -125,3 +125,9 @@ def test_reprocess_force_date_param_only_accepts_a_date_shape(reprocess_dag):
     schema = reprocess_dag.params.get_param("force_date").schema
     assert schema["type"] == "string"
     assert schema["pattern"] == r"^\d{4}-\d{2}-\d{2}$"
+
+
+def test_reprocess_dbt_tasks_never_retry(reprocess_dag):
+    # Manual DAG with deterministic failures: a retry would only delay the error (5 min default).
+    for task_id in DBT_TASKS["dummyjson_reprocess"]:
+        assert reprocess_dag.get_task(task_id).retries == 0

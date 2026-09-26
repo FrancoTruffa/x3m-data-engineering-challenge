@@ -40,8 +40,9 @@ REPROCESS_COMMAND = (
             description="Day to rebuild in silver (carts, cart_items) and gold (YYYY-MM-DD).",
         ),
     },
-    # One retry for transient connection errors; a failing data test is deterministic.
-    default_args={"retries": 1},
+    # No retries: manual DAG, whoever triggers it sees the failure right away. Its failures
+    # (invalid or missing force_date, a failing data test) are deterministic anyway.
+    default_args={"retries": 0},
     tags=["dummyjson", "dbt", "reprocess"],
 )
 def dummyjson_reprocess():

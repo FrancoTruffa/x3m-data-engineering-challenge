@@ -120,7 +120,7 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Alineación con la semántica de Airflow:** el DAG declara `schedule=CronDataIntervalTimetable("30 0 * * *", timezone="UTC")`. La corrida que se ejecuta el día D+1 a las 00:30 cubre el intervalo [D 00:30, D+1 00:30), así que `data_interval_start` y la fecha lógica corresponden al día D y coinciden con la fecha de negocio sin reglas implícitas de "-1 día". El timetable se declara explícito porque en Airflow 3 un cron escrito como string se interpreta como `CronTriggerTimetable` (`create_cron_data_intervals = False` por default): la corrida es un disparo sin intervalo y la fecha lógica sería D+1. El test de integridad del DAG falla si el timetable no es de intervalos. Cómo se detectó: sección 2.
 - **`catchup=False`:** la API no tiene historia. Un backfill capturaría los datos de hoy y los etiquetaría con fechas pasadas: datos incorrectos que parecen correctos. La extracción no es re-ejecutable hacia atrás; las transformaciones sí, desde bronze.
 - **Activo al crearse (`is_paused_upon_creation=False`):** la plataforma mantiene el default de Airflow (DAGs nuevos pausados), pero este DAG se declara activo. No hay una carga inicial distinta de las siguientes: cada corrida trae la foto completa. Con `catchup=False`, al levantar el stack el scheduler crea una sola corrida para el último intervalo cerrado, que es la que habría corrido a las 00:30, con los mismos datos. Así el evaluador ve el pipeline funcionando sin pasos manuales. **Caso borde:** si el stack se levanta entre las 00:00 y las 00:30 UTC, el último intervalo completo es el de anteayer. La guarda de la extracción hace fallar esa corrida en lugar de etiquetar mal los datos (ver "Guarda de la fecha de negocio"); a las 00:30 corre la del día correcto. En un entorno productivo el DAG quedaría pausado y lo habilitaría una persona después del deploy.
-- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Una fecha de negocio que no es el último día cerrado falla sin reintentos (`AirflowFailException`), porque reintentar no la corrige. Las tasks de dbt tienen **un solo reintento**: cubre errores transitorios de conexión con el warehouse, y un test de datos que falla es determinístico, así que más reintentos solo demorarían la falla (con 2 reintentos y backoff, unos 6 minutos).
+- **Reintentos con backoff** ante fallas de la API o respuestas incompletas: en el cliente HTTP (429 y 5xx, con backoff exponencial y timeout) y a nivel task (2 reintentos con backoff exponencial). Una fecha de negocio que no es el último día cerrado falla sin reintentos (`AirflowFailException`), porque reintentar no la corrige. Las tasks de dbt tienen **un solo reintento**: cubre errores transitorios de conexión con el warehouse, y un test de datos que falla es determinístico, así que más reintentos solo demorarían la falla (con 2 reintentos y backoff, unos 6 minutos). La task de `dummyjson_reprocess` no tiene reintentos: es un DAG manual, quien lo dispara ve la falla enseguida, y sus fallas (fecha inválida o inexistente, un test que falla) son determinísticas. Con el reintento por defecto, una fecha inexistente tardaba 5 minutos más en fallar.
 - **Toda espera tiene tope:**
   - Timeout por request HTTP (5 s de conexión y 30 s de lectura).
   - `connect_timeout` de 10 s hacia Postgres.
@@ -212,7 +212,9 @@ Encaja con fuentes que tienen timestamp de evento; con días que se reemplazan c
 - **Re-extraer** (volver a llamar a la API) solo es válido para el último día cerrado; lo controla la guarda. Para días pasados es imposible, porque la API no tiene historia.
 - **Re-transformar** (reconstruir silver y gold desde bronze) sí vale para cualquier día que esté en bronze, porque bronze conserva cada snapshot.
 
-El reprocesamiento dirigido es re-transformar un día puntual.
+El reprocesamiento dirigido es re-transformar un día puntual. **El caso de uso típico es reprocesar un día anterior a hoy** que ya está en bronze, sin volver a llamar a la API.
+
+**Es un proceso separado del flujo diario:** tiene su propio DAG (`dummyjson_reprocess`, manual) y no cambia nada del DAG diario ni del watermark. Para que los dos no se pisen, todas sus tasks de dbt comparten un pool de Airflow de un solo slot (ver abajo).
 
 **Cómo funciona:**
 - **Variable de dbt `force_date` (`YYYY-MM-DD`):** en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue`, dentro del bloque incremental, filtra por esa fecha en lugar del watermark (`audit_logical_date` en bronze, `snapshot_date` en silver). `delete+insert` reemplaza solo ese día. Sin la variable, el comportamiento no cambia (macro `incremental_filter`).
@@ -234,7 +236,7 @@ Sin cambios de lógica ni de bronze, da exactamente el mismo resultado.
 docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector reprocess --vars '{"force_date": "2026-09-24"}'
 ```
 
-Advertencia: el comando manual no pasa por el pool de Airflow. No hay que correrlo mientras corre el DAG diario (a partir de las 00:30 UTC), porque podría pisarse con su build.
+Advertencia: el comando manual no pasa por el pool de Airflow. No hay que correrlo mientras corre el DAG diario, que arranca a las 00:30 UTC y tarda unos minutos, porque podría pisarse con su build.
 
 **Verificado:** tests con fixtures y una corrida real del DAG para el 24/09.
 - `xmin` cambió solo en ese día, en silver y gold.
@@ -432,6 +434,13 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **`silver.products` había quedado afuera.** Al aplicar el watermark a carts y gold, `products` siguió como tabla completa, y leía toda la historia de bronze en cada corrida. Lo detecté preguntando por qué no se había modificado. Además, la IA había escrito en CLAUDE.md la regla "nunca agregar bronze completa" mientras dejaba un modelo que la violaba.
 - **Defender un escenario que había que prohibir.** Para `products` incremental, la IA propuso una condición de "no retroceder" (unir el lote con las filas actuales) y una columna extra (`watermark_ingested_at`), para tolerar la re-carga de un día viejo después de procesar uno más nuevo. Se llegó a implementar y testear. Al revisarlo, vi que ese escenario era en sí un error: sin historia en la API, re-cargar "el 23" el día 25 trae los datos del 24 etiquetados como 23. Lo correcto era prohibirlo en la extracción, no tolerarlo aguas abajo. Se revirtieron la condición y la columna, y se agregó la guarda de la fecha de negocio (1.6). Lección: antes de agregar lógica defensiva, preguntar si el caso que defiende debería existir.
 - **Eliminación de `conf["business_date"]`.** El parámetro para elegir la fecha de una corrida manual parecía una flexibilidad útil (recuperar un día), pero reabría el problema que `catchup=False` cierra: etiquetar con una fecha pasada los datos de hoy. Se eliminó; las corridas manuales siempre cargan el último día cerrado.
+- **Verificación real del reprocesamiento dirigido.** No lo di por bueno solo con los tests con fixtures. Disparé `dummyjson_reprocess` con `force_date = 2026-09-24` sobre el stack real, que tenía cargados el 24/09 y el 25/09, y comparé el `xmin` de cada fila por tabla y por día, antes y después:
+  - solo cambiaron las filas del 24/09 en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue`;
+  - el 25/09 y `silver.products` quedaron intactos;
+  - el contenido de las tres tablas quedó idéntico, incluido `ingested_at`, como se espera sin cambios de lógica;
+  - después corrí el build diario: `INSERT 0 0` en los cuatro modelos y el `xmin` sin cambios, así que el reprocesamiento no alteró el watermark.
+
+  En la misma verificación, un disparo con un parámetro malicioso (`"24/09/2026; rm -rf /"`) lo rechazó la API con HTTP 400, antes de llegar a la shell.
 - **Tests que no probaban lo que decían.** Un test de reintentos ante `Retry-After` pasaba aunque se cambiara el código a respetar el header. La causa: la librería de mocks HTTP simula los reintentos sin ejecutar nunca la espera. Se detectó con una prueba de mutación (cambiar el código y confirmar que el test falle) y el test se reescribió. Desde entonces, los tests de comportamiento crítico (watermark, `Retry-After`) se validan con mutaciones.
 
 ---

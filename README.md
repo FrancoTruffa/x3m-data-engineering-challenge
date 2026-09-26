@@ -37,15 +37,39 @@ docker compose run --rm tests ruff check .
 
 dbt procesa solo los días con cargas nuevas en bronze (watermark de ingesta). Reprocesar vuelve a transformar lo que ya está en bronze; nunca vuelve a llamar a la API.
 
-### Un día puntual
+### Reproceso de un día en particular para Silver y Gold
 
-Desde la UI: disparar el DAG `dummyjson_reprocess` con el parámetro `force_date` (`YYYY-MM-DD`). Reconstruye ese día en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue`, y corre sus tests. Si la fecha no existe en bronze, falla sin tocar nada.
+Sirve para reprocesar **cualquier día anterior a hoy que ya esté en bronze**, sin tocar la API: vuelve a construir ese día en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue` a partir de bronze, y corre sus tests. Es un proceso separado del flujo diario. Casos típicos: después de corregir la lógica de un modelo, o si silver o gold se alteraron por fuera del pipeline. Sin cambios de lógica, el resultado es idéntico.
 
-O por consola, fuera de la ventana del DAG diario (00:30 UTC):
+**Desde la UI de Airflow:** en el DAG `dummyjson_reprocess`, *Trigger*, y completar `force_date` con la fecha (`YYYY-MM-DD`).
+
+**Desde la CLI de Airflow:**
+
+```bash
+docker compose exec airflow-scheduler airflow dags trigger dummyjson_reprocess --conf '{"force_date": "2026-09-24"}'
+```
+
+**Desde la API REST de Airflow:**
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:18080/auth/token -H 'Content-Type: application/json' -d '{"username": "airflow", "password": "airflow"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+```
+
+```bash
+curl -X POST http://localhost:18080/api/v2/dags/dummyjson_reprocess/dagRuns -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"logical_date": null, "conf": {"force_date": "2026-09-24"}}'
+```
+
+**Comando manual de dbt equivalente** (sin Airflow):
 
 ```bash
 docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector reprocess --vars '{"force_date": "2026-09-24"}'
 ```
+
+> No correr el comando manual mientras corre el DAG diario, que arranca a las 00:30 UTC y tarda unos minutos. El DAG `dummyjson_reprocess` no tiene ese problema: comparte con el DAG diario un pool de Airflow de un solo slot, así que sus builds de dbt nunca se superponen.
+
+**Si la fecha no existe en bronze** (o tiene formato inválido), el build falla antes de tocar cualquier tabla, con un mensaje que lo indica. No hay reprocesos silenciosos que no hagan nada.
+
+**`silver.products` no se reprocesa con esto:** reprocesar un día pasado lo haría volver a un estado más viejo del catálogo. Si hace falta repararlo, se usa el full refresh completo (sección siguiente).
 
 ### Todo, desde bronze
 
