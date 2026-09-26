@@ -19,7 +19,8 @@ DBT_POOL = "dbt"
 # shell command) and by dbt's on-run-start hook (format and presence in bronze) before any model.
 REPROCESS_COMMAND = (
     "/opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt"
-    " --select carts cart_items product_daily_revenue"
+    # Selector (dbt/selectors.yml): carts, cart_items, product_daily_revenue + singular tests.
+    " --selector reprocess"
     ' --vars \'{"force_date": "{{ params.force_date }}"}\''
 )
 

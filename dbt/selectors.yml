@@ -18,3 +18,21 @@ selectors:
           value: models/gold
         - method: path
           value: tests/gold
+
+  # Targeted reprocessing (dummyjson_reprocess, with --vars force_date): the day models plus the
+  # singular tests of both layers. Tests that read a bronze source (row counts) aren't picked up
+  # by model selection under cautious indirect selection, so they're listed by path.
+  # silver.products is excluded: reprocessing a past day would take it back to an older state.
+  - name: reprocess
+    definition:
+      union:
+        - method: fqn
+          value: carts
+        - method: fqn
+          value: cart_items
+        - method: fqn
+          value: product_daily_revenue
+        - method: path
+          value: tests/silver
+        - method: path
+          value: tests/gold

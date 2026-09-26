@@ -44,7 +44,7 @@ Desde la UI: disparar el DAG `dummyjson_reprocess` con el parámetro `force_date
 O por consola, fuera de la ventana del DAG diario (00:30 UTC):
 
 ```bash
-docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --select carts cart_items product_daily_revenue --vars '{"force_date": "2026-09-24"}'
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector reprocess --vars '{"force_date": "2026-09-24"}'
 ```
 
 ### Todo, desde bronze

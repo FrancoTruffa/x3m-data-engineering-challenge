@@ -114,9 +114,9 @@ def test_reprocess_dag_is_manual_only(reprocess_dag):
 def test_reprocess_dag_builds_the_day_models_with_force_date(reprocess_dag):
     command = reprocess_dag.get_task("dbt_build_force_date").bash_command
     assert command.startswith("/opt/dbt-venv/bin/dbt build ")  # build (with tests), never run
-    # silver.products is excluded: reprocessing a past day would take it back to an older state.
-    selected = command.split("--select ")[1].split(" --")[0].split()
-    assert selected == ["carts", "cart_items", "product_daily_revenue"]
+    # Models and singular tests of the "reprocess" selector (checked in tests/dbt/test_reprocess.py:
+    # carts, cart_items, product_daily_revenue; never silver.products).
+    assert "--selector reprocess" in command
     assert '"force_date": "{{ params.force_date }}"' in command
 
 

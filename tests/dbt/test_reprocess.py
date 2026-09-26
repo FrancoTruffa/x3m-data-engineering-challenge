@@ -12,7 +12,7 @@ DAY_A, DAY_B, DAY_C = date(2026, 9, 22), date(2026, 9, 23), date(2026, 9, 24)
 PRODUCTS = load_fixture("products")
 CARTS = load_fixture("carts")
 # Same selection as dags/dummyjson_reprocess.py.
-REPROCESS_SELECT = ["--select", "carts", "cart_items", "product_daily_revenue"]
+REPROCESS_SELECT = ["--selector", "reprocess"]
 
 
 def ts(hour: int) -> datetime:
@@ -109,3 +109,15 @@ def test_daily_build_after_a_reprocess_processes_nothing(three_days):
     three_days.build()  # daily flow, no new loads
 
     assert three_days.row_versions() == after_reprocess
+
+
+def test_reprocess_selector_covers_the_day_models_and_checks_but_not_products(warehouse):
+    result = warehouse.dbt("ls", *REPROCESS_SELECT, "--resource-type", "model", "--output", "name")
+    models = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    assert {"carts", "cart_items", "product_daily_revenue"} <= models
+    assert "products" not in models
+
+    result = warehouse.dbt("ls", *REPROCESS_SELECT, "--resource-type", "test", "--output", "name")
+    assert "silver_row_counts_match_bronze" in result.stdout
+    assert "silver_cart_lines_reconcile_with_cart_totals" in result.stdout
+    assert "gold_revenue_reconciles_with_silver_carts" in result.stdout

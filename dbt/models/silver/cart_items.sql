@@ -4,7 +4,7 @@
         incremental_strategy='delete+insert',
         unique_key='snapshot_date',
         on_schema_change='fail',
-        indexes=[{'columns': ['ingested_at']}],
+        indexes=[{'columns': ['ingested_at']}, {'columns': ['snapshot_date']}],
     )
 }}
 

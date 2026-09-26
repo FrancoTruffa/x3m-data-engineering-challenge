@@ -38,13 +38,13 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 
 - **dbt no recibe fechas.** No usar `--vars` para pasarle la fecha de negocio. El incremental es el patrón estándar de dbt: dentro de `is_incremental()`, filtrar `audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity') from {{ this }})` (en gold, `ingested_at` de `silver.cart_items`), con `delete+insert` y `unique_key` = fecha (o `product_id` en products).
   - No calcular días pendientes en un paso previo: cada carga de bronze reemplaza un día completo con un único timestamp, así que las filas nuevas son días completos, y `delete+insert` reemplaza esos días.
-  - **Todos los modelos de silver y gold son incrementales.** Nunca agregar bronze completa en una corrida incremental; solo el full refresh la recorre. Índices: `audit_ingestion_timestamp` en `bronze.products` y `bronze.carts`, y la columna de watermark en silver y gold (config `indexes`).
+  - **Todos los modelos de silver y gold son incrementales.** Nunca agregar bronze completa en una corrida incremental, tampoco en tests (el chequeo de volumen `silver_row_counts_match_bronze` mira solo la última carga o `force_date`); solo el full refresh la recorre. Índices: `audit_ingestion_timestamp` en `bronze.products` y `bronze.carts`, y la columna de watermark en silver y gold (config `indexes`).
   - **Supuesto:** los timestamps de ingesta crecen en el mismo orden que los commits de las cargas. Se cumple porque hay un solo escritor (el DAG) y `max_active_runs=1`. No cargar bronze desde otros procesos en paralelo.
 - **Tasks del DAG:** ejecutan `dbt build --selector silver` y `dbt build --selector gold` (`dbt/selectors.yml`). Cada selector incluye los modelos y los tests singulares de su capa. El compose define `DBT_INDIRECT_SELECTION=cautious`, para que el build de silver no corra el test de reconciliación de gold antes de reconstruir gold.
 - **`max_active_runs=1` en el DAG es obligatorio:** el watermark es estado compartido, y dos corridas simultáneas podrían procesar el mismo día en paralelo.
 - **Reprocesamiento dirigido:** la variable de dbt `force_date` (`YYYY-MM-DD`) hace que `carts`, `cart_items` y `product_daily_revenue` reconstruyan solo ese día en lugar de usar el watermark (macro `incremental_filter`). `silver.products` queda afuera; se repara con full refresh.
   - El hook `on-run-start` (`validate_force_date`) falla antes de cualquier modelo si la fecha es inválida, no existe en bronze o se combina con `--full-refresh`. Nada de no-ops silenciosos.
-  - Se ejecuta con el DAG `dummyjson_reprocess` (sin schedule, parámetro `force_date` con patrón de fecha, siempre `dbt build`, nunca `run`). Las filas conservan el `ingested_at` de bronze: el watermark diario no se altera.
+  - Se ejecuta con el DAG `dummyjson_reprocess` (sin schedule, parámetro `force_date` con patrón de fecha, `dbt build --selector reprocess`, nunca `run`). El selector incluye los tests singulares por ruta: un test que lee una source de bronze no se selecciona por los modelos con `cautious`. Las filas conservan el `ingested_at` de bronze: el watermark diario no se altera.
 - **Pool `dbt` (1 slot, lo crea `airflow-init`):** obligatorio en toda task de dbt de cualquier DAG; nunca corren dos builds a la vez.
 - **Reparación completa:** `dbt build --full-refresh`. Casos que el watermark no detecta y requieren full refresh: un bug corregido en la lógica de silver o gold (bronze no cambió), y una corrección de `audit_logical_date` en bronze (un `UPDATE` no cambia `audit_ingestion_timestamp`).
 - **Efecto sobre `product_title` en gold:** los días ya procesados conservan el título del catálogo vigente cuando se procesaron. Un renombre solo se ve en los días nuevos, o en todos después de un full refresh.
@@ -96,17 +96,17 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │   ├── packages.yml            # dbt_utils con versión exacta
 │   ├── package-lock.yml        # lock de paquetes; `dbt deps` corre en el build de la imagen
 │   ├── profiles.yml            # lee WAREHOUSE_*
-│   ├── selectors.yml           # selectores `silver` y `gold` (modelos + tests singulares de la capa)
+│   ├── selectors.yml           # selectores `silver`, `gold` y `reprocess` (modelos + tests singulares)
 │   ├── macros/                 # generate_schema_name, force_date (incremental_filter + validate_force_date)
 │   ├── models/
 │   │   ├── sources.yml
 │   │   ├── silver/             # products.sql, carts.sql, cart_items.sql + schema.yml
 │   │   └── gold/               # product_daily_revenue.sql + schema.yml
-│   └── tests/                  # tests singulares de reconciliación: silver/, gold/
+│   └── tests/                  # tests singulares: reconciliación de valor y volumen bronze→silver (silver/, gold/)
 ├── tests/
 │   ├── unit/                   # client, loader, business_date, logging, run
 │   ├── dags/                   # integridad del DAG
-│   ├── dbt/                    # integración dbt: watermark, products, reprocesamiento, full refresh (DB temporal)
+│   ├── dbt/                    # integración dbt: watermark, products, reprocesamiento, volumen, full refresh (DB temporal)
 │   └── fixtures/               # products.json, carts.json (incluye casos borde)
 ├── scripts/
 │   └── load_fixtures.py        # carga fixtures en bronze (usado por CI)

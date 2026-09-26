@@ -171,7 +171,7 @@ where audit_ingestion_timestamp > (select coalesce(max(ingested_at), '-infinity'
 - **Silver `products`:** el mismo filtro, con reemplazo por `product_id` y el snapshot más reciente por producto dentro del lote (ver 1.4).
 - **Gold:** el mismo filtro contra `silver.cart_items`.
 - **Por qué alcanza con filtrar filas, sin calcular antes qué días procesar:** el loader reemplaza el día completo en bronze con un único timestamp por carga. Entonces las filas nuevas son **snapshots completos** de los días que cambiaron. `delete+insert` con `unique_key` = fecha borra de la tabla destino los días que vienen en el lote y los reinserta: dbt deduce qué días reemplazar a partir del contenido del lote. En silver, todas las líneas de un día comparten el mismo `ingested_at`, así que gold recibe días completos igual.
-- **Lectura acotada:** `bronze.products` y `bronze.carts` tienen un índice por `audit_ingestion_timestamp`. Silver y gold tienen índices por su columna de watermark (config `indexes` de dbt), y `silver.products` además un índice único por `product_id`. La consulta del máximo lee una sola entrada del índice, y bronze se lee solo en el rango nuevo; está verificado con `EXPLAIN`. Solo el full refresh recorre todo.
+- **Lectura acotada:** `bronze.products` y `bronze.carts` tienen un índice por `audit_ingestion_timestamp`. Silver y gold tienen índices por su columna de watermark (config `indexes` de dbt), `silver.products` además un índice único por `product_id`, y `silver.carts` y `silver.cart_items` uno por `snapshot_date` (lo usan el `delete+insert` y el chequeo de volumen). La consulta del máximo lee una sola entrada del índice, y bronze se lee solo en el rango nuevo; está verificado con `EXPLAIN`. Solo el full refresh recorre todo.
 - **Cómo se ejecuta:** las tasks del DAG corren `dbt build --selector silver` y `dbt build --selector gold`, sin `--vars`. En el primer build, o en un full refresh, se procesa todo.
 - **Supuesto que lo hace correcto:** los timestamps de ingesta crecen en el mismo orden en que se confirman las cargas. Si una carga tomara su timestamp, tardara en hacer commit y en el medio dbt procesara otra más nueva, la primera quedaría por debajo del watermark y no se procesaría. Acá no puede pasar: hay un solo escritor (el DAG), `max_active_runs=1`, y dbt corre después de las extracciones. Cargar bronze desde otro proceso en paralelo rompería el supuesto.
 
@@ -219,7 +219,7 @@ El reprocesamiento dirigido es re-transformar un día puntual.
 - **`silver.products` queda afuera:** reprocesar un día pasado lo haría retroceder a un estado más viejo. Se repara con full refresh de ese modelo.
 - **Validación sin no-ops silenciosos:** un hook `on-run-start` corre antes de cualquier modelo y hace fallar el build si `force_date` tiene formato inválido, es una fecha imposible, no existe en bronze, o se combina con `--full-refresh`. Nada se modifica.
 - **Watermark intacto:** las filas reprocesadas conservan el `ingested_at` original, que viene de bronze. El build diario siguiente no procesa nada extra.
-- **DAG `dummyjson_reprocess`:** sin schedule, con el parámetro `force_date` (validado con un patrón de fecha al disparar, porque termina en un comando de shell). Corre `dbt build --select carts cart_items product_daily_revenue --vars '{"force_date": ...}'`: siempre `build`, con los tests de esos modelos, nunca `run`.
+- **DAG `dummyjson_reprocess`:** sin schedule, con el parámetro `force_date` (validado con un patrón de fecha al disparar, porque termina en un comando de shell). Corre `dbt build --selector reprocess --vars '{"force_date": ...}'`: siempre `build`, nunca `run`. El selector `reprocess` (`dbt/selectors.yml`) incluye esos tres modelos, sus tests y los tests singulares de silver y gold. Los singulares se listan por ruta porque el chequeo de volumen lee una source de bronze, y con `cautious` no quedaría seleccionado por los modelos.
 - **Pool `dbt` con 1 slot:** todas las tasks de dbt de los dos DAGs usan este pool, que crea `airflow-init`. Nunca corren dos builds a la vez, por ejemplo un reprocesamiento durante el build diario.
 
 **Cuándo sirve:**
@@ -231,7 +231,7 @@ Sin cambios de lógica ni de bronze, da exactamente el mismo resultado.
 **Comando manual (alternativa al DAG):**
 
 ```bash
-docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --select carts cart_items product_daily_revenue --vars '{"force_date": "2026-09-24"}'
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector reprocess --vars '{"force_date": "2026-09-24"}'
 ```
 
 Advertencia: el comando manual no pasa por el pool de Airflow. No hay que correrlo mientras corre el DAG diario (a partir de las 00:30 UTC), porque podría pisarse con su build.
@@ -269,6 +269,23 @@ Hay un test que verifica que el full refresh reconstruye silver y gold desde bro
   - `quantity > 0` y `unit_price >= 0`.
   - Integridad referencial `cart_items.product_id` → `products`, con severidad `warn`.
   - Reconciliación: la suma de `line_total` por cart coincide con `carts.total`, con tolerancia de centavos.
+  - **Volumen bronze → silver** (`silver_row_counts_match_bronze`, falla, no advierte):
+    - la cantidad de carts por día en `bronze.carts` coincide con la de `silver.carts`;
+    - para cada cart y día, la cantidad de elementos del array `products` del JSON de bronze coincide con sus filas en `silver.cart_items`;
+    - un día o un cart presente en un solo lado también falla.
+
+    Corre en el build de silver y en el reprocesamiento dirigido. **Complementa, no reemplaza, las reconciliaciones de valor** (`silver_cart_lines_reconcile_with_cart_totals` y `gold_revenue_reconciles_with_silver_carts`): este chequeo detecta **filas perdidas o de más**, y aquellas detectan **contenido corrupto con la misma cantidad de filas**. Los tests de integración muestran casos que solo ve uno de los dos: un cart perdido junto con sus líneas y una línea extra con montos en cero pasan la reconciliación de valor y los detecta el de volumen.
+
+    **Alcance: la última carga, no toda la historia.** Recorrer bronze completa en cada build no escala. Por eso el chequeo compara solo los días de bronze con `audit_ingestion_timestamp` mayor o igual al `max(ingested_at)` de `silver.carts`: en una corrida diaria, el día recién procesado. Con `force_date`, compara ese día. Todo el chequeo usa índices (verificado con `EXPLAIN`); para el lado de silver se agregaron índices por `snapshot_date` en `carts` y `cart_items`.
+
+    - **Por qué "mayor o igual" sobre el watermark actual y no "mayor" sobre el previo:** el test corre después de los modelos, cuando silver ya incorporó la carga nueva. El watermark previo al build ya no está en ninguna tabla, y "mayor" daría una ventana vacía: un test de mutación lo confirma. Si el modelo perdiera el día entero, el máximo de silver quedaría atrás y la ventana se ampliaría para incluirlo.
+    - **Por qué no se capturó el watermark previo con `store_result`/`load_result` en un hook `on-run-start`:** se probó, y no funciona. dbt crea un contexto de ejecución por nodo, y lo que guarda el hook no llega al test (`load_result` devuelve `None`).
+    - **Por qué no se usó el watermark de gold** (que durante el build de silver todavía tiene el valor previo): la comparación bronze → silver no debe depender del estado de otra capa.
+    - **Por qué no una columna ni una tabla nueva** (`processed_at`, o una tabla con el watermark de cada corrida): agregan estado persistente para un chequeo que solo necesita la última carga.
+
+    **Costos aceptados:**
+    - **Los días viejos no se vuelven a auditar en cada corrida.** Si un día quedó con un conteo desalineado por un problema ya resuelto, no se detecta de nuevo solo; se repara con un full refresh o se revisa con `force_date`. Lo compensaría la **tabla de control de cargas** documentada como mejora de producción: un registro por corrida permitiría auditar la historia sin volver a leer bronze.
+    - **Recuperación de varios días:** si un día fallan los modelos de dbt y al día siguiente el watermark procesa los dos, el chequeo verifica solo el más reciente. Si lo que falló fue un test y no un modelo, el chequeo ya había corrido sobre ese día en su propia corrida.
 - **Gold (tests de dbt):**
   - Unicidad de `(product_id, date)`.
   - `not_null` en las columnas requeridas.
@@ -352,6 +369,13 @@ Los escenarios cargan los días en el orden que garantiza la guarda: cada día d
 
 Validado con mutaciones: sacando cada validación, o si el filtro ignora `force_date`, el test correspondiente falla.
 
+**Chequeo de volumen bronze → silver:** después de un build correcto se altera silver para simular un bug de transformación (un cart perdido con sus líneas, una línea perdida, una línea extra) y el chequeo falla en cada caso. Los tests afirman también qué ve la reconciliación de valor en cada caso. Sobre la ventana:
+- se verifica el día recién procesado;
+- un día viejo alterado **no** se vuelve a auditar (costo aceptado, fijado por un test);
+- con `force_date` se verifica ese día.
+
+Validado con mutaciones: fallan los tests si se quita el chequeo o cualquiera de sus partes, si la ventana pasa a ser toda la historia, si se usa "mayor" en lugar de "mayor o igual" (la ventana queda vacía) y si se ignora `force_date`.
+
 **Guarda de la fecha de negocio (unitarios):** corrida programada en horario y demorada dentro del día, corrida programada después de la medianoche siguiente, *Clear* de una corrida vieja, arranque entre las 00:00 y las 00:30, corrida manual, y corrida manual que cruza la medianoche.
 
 Para saber qué días o productos se reprocesaron, los tests comparan `xmin`, la columna de sistema de Postgres que cambia cuando una fila se vuelve a insertar. No hace falta agregar columnas técnicas a los modelos. Los tests se validaron con mutaciones y fallan en cada caso:
@@ -431,4 +455,7 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Si la fuente tuviera historia**, habilitar `catchup` y backfills: la extracción pasaría a ser re-ejecutable y el resto del diseño no cambiaría.
 - **Almacenamiento y cómputo:** bronze en object storage con formato tabular abierto (Iceberg/Delta) particionado por fecha lógica, en lugar de una base relacional local.
 - **Garantizar el supuesto del watermark con varios escritores:** si bronze se cargara desde más de un proceso en paralelo, los timestamps de ingesta dejarían de ser monótonos respecto del commit (ver 1.6). Haría falta un número de secuencia asignado al confirmar cada carga, por ejemplo en una tabla de control, o un margen de reprocesamiento sobre el watermark.
+- **Frescura de los datos:** comparar la fecha más reciente cargada contra la fecha actual y alertar si el pipeline dejó de correr sin un error explícito, por ejemplo con el scheduler caído o el DAG pausado. Una falla se nota; una ausencia silenciosa, no. No se implementa porque suma alcance sin un beneficio claro en una evaluación puntual; en un pipeline que corre durante meses sería de lo primero a agregar.
+- **Volumen día contra día:** comparar la cantidad de registros del día contra el promedio de días anteriores, para detectar una caída anómala en la fuente. Hoy, si la API devolviera 20 carts en lugar de 208, el `total` coincidiría y el pipeline terminaría bien con datos incompletos. No se implementa por la misma razón: necesita historia de varios días para tener un umbral con sentido.
+- **Tabla de control de cargas** (`_control.pipeline_runs` o similar): una fila por corrida con fecha procesada, registros extraídos y esperados, duración y resultado. Permite monitorear la operación con SQL, sin revisar logs de Airflow uno por uno, y sirve de base para los dos chequeos anteriores. No se implementa ahora: hoy esa información está en los logs estructurados y en el resumen de cada task.
 - **Alertas a un canal real** (Slack, email, PagerDuty) conectadas al `on_failure_callback`, y métricas del pipeline (registros por corrida, duración, frescura del dato) enviadas a un sistema de monitoreo.
