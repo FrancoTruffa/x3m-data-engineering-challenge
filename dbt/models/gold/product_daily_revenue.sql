@@ -14,13 +14,12 @@
 -- from a single bronze load), so those are complete days, replaced with delete+insert on date.
 -- product_title comes from the catalog at processing time; already processed dates keep it until
 -- they're reprocessed (see DECISIONS.md).
+-- With the dbt var force_date, only that day is rebuilt instead (macros/force_date.sql).
 with items as (
     select *
     from {{ ref('cart_items') }}
     {% if is_incremental() %}
-    where ingested_at > (
-        select coalesce(max(ingested_at), '-infinity'::timestamptz) from {{ this }}
-    )
+    where {{ incremental_filter('snapshot_date', 'ingested_at') }}
     {% endif %}
 )
 

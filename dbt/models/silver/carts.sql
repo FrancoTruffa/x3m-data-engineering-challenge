@@ -12,6 +12,7 @@
 -- Incremental by ingestion watermark: only bronze rows loaded after the latest ingested_at already
 -- here are read. Each bronze load replaces a whole day with a single timestamp, so those rows are
 -- complete snapshots of the changed days, and delete+insert on snapshot_date replaces them.
+-- With the dbt var force_date, only that day is rebuilt instead (macros/force_date.sql).
 select
     audit_logical_date                          as snapshot_date,
     id                                          as cart_id,
@@ -23,7 +24,5 @@ select
     audit_ingestion_timestamp                   as ingested_at
 from {{ source('bronze', 'carts') }}
 {% if is_incremental() %}
-where audit_ingestion_timestamp > (
-    select coalesce(max(ingested_at), '-infinity'::timestamptz) from {{ this }}
-)
+where {{ incremental_filter('audit_logical_date', 'audit_ingestion_timestamp') }}
 {% endif %}

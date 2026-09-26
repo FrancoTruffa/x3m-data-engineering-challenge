@@ -82,7 +82,12 @@ services:
 
   airflow-init:
     <<: *airflow-common
-    command: version
+    # The image entrypoint migrates the DB and creates the user (_AIRFLOW_* vars below) first.
+    # Pool "dbt" with 1 slot: no two dbt builds ever run at once (daily and reprocess DAGs).
+    command:
+      - bash
+      - -c
+      - airflow pools set dbt 1 "Serializes dbt builds across DAGs" && airflow version
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

@@ -19,6 +19,8 @@ from ingestion.logging import on_task_failure
 from ingestion.run import extract_and_load
 
 DBT_BUILD = "/opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector {layer}"
+# Created by airflow-init with 1 slot: dbt builds never overlap, in this DAG or dummyjson_reprocess.
+DBT_POOL = "dbt"
 
 
 @dag(
@@ -71,10 +73,16 @@ def dummyjson_pipeline():
     # One retry only: it covers transient connection errors, while a failing data test is
     # deterministic and more retries would just delay the failure.
     dbt_build_silver = BashOperator(
-        task_id="dbt_build_silver", bash_command=DBT_BUILD.format(layer="silver"), retries=1
+        task_id="dbt_build_silver",
+        bash_command=DBT_BUILD.format(layer="silver"),
+        retries=1,
+        pool=DBT_POOL,
     )
     dbt_build_gold = BashOperator(
-        task_id="dbt_build_gold", bash_command=DBT_BUILD.format(layer="gold"), retries=1
+        task_id="dbt_build_gold",
+        bash_command=DBT_BUILD.format(layer="gold"),
+        retries=1,
+        pool=DBT_POOL,
     )
 
     (

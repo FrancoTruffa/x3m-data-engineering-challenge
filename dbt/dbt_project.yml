@@ -9,6 +9,9 @@ macro-paths: ["macros"]
 # Installed at image build time, outside the read-only bind mount of this directory.
 packages-install-path: "{{ env_var('DBT_PACKAGES_INSTALL_PATH', 'dbt_packages') }}"
 
+on-run-start:
+  - "{{ validate_force_date() }}"
+
 models:
   x3m_pipeline:
     silver:

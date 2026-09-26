@@ -84,3 +84,44 @@ def test_tasks_retry_and_report_failures(dag):
         assert task.retries == expected_retries[task.task_id]
         assert task.execution_timeout == timedelta(minutes=10)
         assert on_task_failure in task.on_failure_callback
+
+
+DBT_TASKS = {
+    "dummyjson_pipeline": ["dbt_build_silver", "dbt_build_gold"],
+    "dummyjson_reprocess": ["dbt_build_force_date"],
+}
+
+
+def test_all_dbt_tasks_share_the_single_slot_pool(dagbag):
+    # One pool with 1 slot (created by airflow-init): two dbt builds never run at once.
+    for dag_id, task_ids in DBT_TASKS.items():
+        for task_id in task_ids:
+            assert dagbag.get_dag(dag_id).get_task(task_id).pool == "dbt", (dag_id, task_id)
+
+
+@pytest.fixture(scope="module")
+def reprocess_dag(dagbag):
+    return dagbag.get_dag("dummyjson_reprocess")
+
+
+def test_reprocess_dag_is_manual_only(reprocess_dag):
+    assert reprocess_dag.timetable.can_be_scheduled is False
+    assert reprocess_dag.catchup is False
+    assert reprocess_dag.max_active_runs == 1
+    assert reprocess_dag.task_ids == ["dbt_build_force_date"]
+
+
+def test_reprocess_dag_builds_the_day_models_with_force_date(reprocess_dag):
+    command = reprocess_dag.get_task("dbt_build_force_date").bash_command
+    assert command.startswith("/opt/dbt-venv/bin/dbt build ")  # build (with tests), never run
+    # silver.products is excluded: reprocessing a past day would take it back to an older state.
+    selected = command.split("--select ")[1].split(" --")[0].split()
+    assert selected == ["carts", "cart_items", "product_daily_revenue"]
+    assert '"force_date": "{{ params.force_date }}"' in command
+
+
+def test_reprocess_force_date_param_only_accepts_a_date_shape(reprocess_dag):
+    # The value ends up in a shell command: the pattern is checked when the run is triggered.
+    schema = reprocess_dag.params.get_param("force_date").schema
+    assert schema["type"] == "string"
+    assert schema["pattern"] == r"^\d{4}-\d{2}-\d{2}$"

@@ -35,7 +35,21 @@ docker compose run --rm tests ruff check .
 
 ## Reprocesamiento
 
-dbt procesa solo los días con cargas nuevas en bronze (watermark de ingesta). Para reconstruir silver y gold completos desde bronze, por ejemplo después de corregir un bug en un modelo o una etiqueta de fecha en bronze:
+dbt procesa solo los días con cargas nuevas en bronze (watermark de ingesta). Reprocesar vuelve a transformar lo que ya está en bronze; nunca vuelve a llamar a la API.
+
+### Un día puntual
+
+Desde la UI: disparar el DAG `dummyjson_reprocess` con el parámetro `force_date` (`YYYY-MM-DD`). Reconstruye ese día en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue`, y corre sus tests. Si la fecha no existe en bronze, falla sin tocar nada.
+
+O por consola, fuera de la ventana del DAG diario (00:30 UTC):
+
+```bash
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --select carts cart_items product_daily_revenue --vars '{"force_date": "2026-09-24"}'
+```
+
+### Todo, desde bronze
+
+Por ejemplo, después de corregir un bug en un modelo o una etiqueta de fecha en bronze:
 
 ```bash
 docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector silver --full-refresh
@@ -45,4 +59,4 @@ docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir 
 docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --selector gold --full-refresh
 ```
 
-Primero silver y después gold, en ese orden. Cuándo hace falta y por qué: [DECISIONS.md, sección 1.6](DECISIONS.md#reprocesamiento-dbt-build---full-refresh).
+Primero silver y después gold, en ese orden. Cuándo hace falta y por qué: [DECISIONS.md, sección 1.6](DECISIONS.md#reprocesamiento-completo-dbt-build---full-refresh).

@@ -150,7 +150,13 @@ La API no tiene historia: lo que devuelve pertenece siempre al **último día ce
 | Corrida manual disparada antes de medianoche que ejecuta después | falla |
 | Stack levantado entre las 00:00 y las 00:30 UTC (el intervalo completo es el de anteayer) | falla, en lugar de etiquetar mal; a las 00:30 corre la del día correcto |
 
-Verificado con corridas reales: la programada y una manual pasan, y una corrida de un intervalo viejo (creada con `airflow backfill create`) falla en el primer intento sin tocar bronze, con el `task_failed` del callback indicando la fecha rechazada.
+Verificado con corridas reales:
+- **Pasan:** la corrida programada del 25/09, que se ejecutó sola el 26/09 a las 00:30, y una corrida manual del 26/09, que recargó el 25/09.
+- **Fallan en el primer intento, sin reintentos:**
+  - un *Clear* desde la API, que es la que usa la UI, de la corrida programada del 24/09 ejecutado el 26/09;
+  - una corrida de un intervalo viejo creada con `airflow backfill create`.
+
+  En los dos casos la task falla antes de llamar a la API: no hay ningún evento `extraction_started`. Bronze quedó idéntico, con el mismo hash antes y después, y el `task_failed` del callback indica la fecha rechazada junto con la que expone la API.
 
 **Consecuencia:** la única re-carga legítima de un día es el reintento de ese mismo día, dentro de su ventana. **Supuesto documentado:** bronze solo recibe cargas del día recién cerrado, y la guarda lo garantiza para todo lo que pasa por el DAG. Si se viola por fuera del DAG (una carga manual directa a bronze o un `UPDATE` de fechas), se repara con full refresh (ver "Reprocesamiento").
 
@@ -195,13 +201,49 @@ Encaja con fuentes que tienen timestamp de evento; con días que se reemplazan c
 **Costos del watermark:**
 - **El comando del DAG ya no explicita qué día procesa.** Se compensa con los logs de dbt (`INSERT 0 N` por modelo) y con `ingested_at` en silver y gold, que permite rastrear de qué carga viene cada fila.
 - **Requiere serializar las corridas:** el estado es compartido (lo que ya está en silver y gold), y dos corridas simultáneas podrían procesar el mismo día en paralelo. El DAG tiene `max_active_runs=1`.
-- **No hay override de fechas** (`force_dates` o similar). Las reparaciones se hacen con full refresh (ver abajo).
+- **Reparaciones fuera del watermark:** un día puntual con reprocesamiento dirigido (`force_date`), o todo con full refresh (ver abajo).
 
 `resolve_business_date` no cambia: sigue decidiendo con qué fecha se carga bronze.
 
 **Selección de tests por capa:** los selectores `silver` y `gold` (`dbt/selectors.yml`) incluyen los modelos y los tests singulares de cada capa, y el compose define `DBT_INDIRECT_SELECTION=cautious`. Con el modo por defecto (*eager*), el build de silver incluía el test de reconciliación gold contra silver y lo corría antes de reconstruir gold, lo que daba un falso error cada vez que llegaba un día nuevo. Con *cautious* solo, ese test no quedaba seleccionado en ningún build; por eso los selectores listan los tests singulares por ruta.
 
-#### Reprocesamiento: `dbt build --full-refresh`
+#### Reprocesamiento dirigido: `force_date` y el DAG `dummyjson_reprocess`
+
+**Re-extraer y re-transformar son operaciones distintas.**
+- **Re-extraer** (volver a llamar a la API) solo es válido para el último día cerrado; lo controla la guarda. Para días pasados es imposible, porque la API no tiene historia.
+- **Re-transformar** (reconstruir silver y gold desde bronze) sí vale para cualquier día que esté en bronze, porque bronze conserva cada snapshot.
+
+El reprocesamiento dirigido es re-transformar un día puntual.
+
+**Cómo funciona:**
+- **Variable de dbt `force_date` (`YYYY-MM-DD`):** en `silver.carts`, `silver.cart_items` y `gold.product_daily_revenue`, dentro del bloque incremental, filtra por esa fecha en lugar del watermark (`audit_logical_date` en bronze, `snapshot_date` en silver). `delete+insert` reemplaza solo ese día. Sin la variable, el comportamiento no cambia (macro `incremental_filter`).
+- **`silver.products` queda afuera:** reprocesar un día pasado lo haría retroceder a un estado más viejo. Se repara con full refresh de ese modelo.
+- **Validación sin no-ops silenciosos:** un hook `on-run-start` corre antes de cualquier modelo y hace fallar el build si `force_date` tiene formato inválido, es una fecha imposible, no existe en bronze, o se combina con `--full-refresh`. Nada se modifica.
+- **Watermark intacto:** las filas reprocesadas conservan el `ingested_at` original, que viene de bronze. El build diario siguiente no procesa nada extra.
+- **DAG `dummyjson_reprocess`:** sin schedule, con el parámetro `force_date` (validado con un patrón de fecha al disparar, porque termina en un comando de shell). Corre `dbt build --select carts cart_items product_daily_revenue --vars '{"force_date": ...}'`: siempre `build`, con los tests de esos modelos, nunca `run`.
+- **Pool `dbt` con 1 slot:** todas las tasks de dbt de los dos DAGs usan este pool, que crea `airflow-init`. Nunca corren dos builds a la vez, por ejemplo un reprocesamiento durante el build diario.
+
+**Cuándo sirve:**
+- después de corregir la lógica de silver o gold, para rehacer un día sin reconstruir todo;
+- si silver o gold se alteraron por fuera del pipeline.
+
+Sin cambios de lógica ni de bronze, da exactamente el mismo resultado.
+
+**Comando manual (alternativa al DAG):**
+
+```bash
+docker compose exec airflow-scheduler /opt/dbt-venv/bin/dbt build --project-dir /opt/airflow/dbt --select carts cart_items product_daily_revenue --vars '{"force_date": "2026-09-24"}'
+```
+
+Advertencia: el comando manual no pasa por el pool de Airflow. No hay que correrlo mientras corre el DAG diario (a partir de las 00:30 UTC), porque podría pisarse con su build.
+
+**Verificado:** tests con fixtures y una corrida real del DAG para el 24/09.
+- `xmin` cambió solo en ese día, en silver y gold.
+- El contenido quedó idéntico.
+- El build diario posterior no procesó nada.
+- Un parámetro con formato inválido lo rechaza la API al disparar (HTTP 400).
+
+#### Reprocesamiento completo: `dbt build --full-refresh`
 
 El watermark detecta **cargas nuevas en bronze**. No detecta cambios que no pasan por una carga nueva, y esos casos se reparan con un full refresh, que reconstruye silver y gold completos desde bronze:
 
@@ -303,6 +345,14 @@ dbt se invoca sin fechas: cada capa procesa lo pendiente según el watermark de 
 
 Los escenarios cargan los días en el orden que garantiza la guarda: cada día después del anterior, y la única re-carga es el reintento del mismo día.
 
+**Reprocesamiento dirigido (`force_date`):**
+- reprocesar un día reemplaza solo ese día; los demás no cambian (`xmin`);
+- sin cambios de lógica, el resultado es el mismo;
+- una fecha inexistente en bronze, mal formada o imposible falla antes de tocar cualquier tabla, igual que combinarla con `--full-refresh`;
+- después de un reprocesamiento, el build diario no procesa nada extra.
+
+Validado con mutaciones: sacando cada validación, o si el filtro ignora `force_date`, el test correspondiente falla.
+
 **Guarda de la fecha de negocio (unitarios):** corrida programada en horario y demorada dentro del día, corrida programada después de la medianoche siguiente, *Clear* de una corrida vieja, arranque entre las 00:00 y las 00:30, corrida manual, y corrida manual que cruza la medianoche.
 
 Para saber qué días o productos se reprocesaron, los tests comparan `xmin`, la columna de sistema de Postgres que cambia cuando una fila se vuelve a insertar. No hace falta agregar columnas técnicas a los modelos. Los tests se validaron con mutaciones y fallan en cada caso:
@@ -374,6 +424,5 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 - **Confirmar con el negocio la semántica de la fuente:** si la actualización de medianoche cierra el día anterior y si los snapshots son completos o acumulativos.
 - **Si la fuente tuviera historia**, habilitar `catchup` y backfills: la extracción pasaría a ser re-ejecutable y el resto del diseño no cambiaría.
 - **Almacenamiento y cómputo:** bronze en object storage con formato tabular abierto (Iceberg/Delta) particionado por fecha lógica, en lugar de una base relacional local.
-- **Override opcional de fechas (`force_dates`)** para reprocesar días puntuales sin reconstruir todo, manteniendo el watermark como comportamiento por defecto. Hoy la única herramienta de reparación es el full refresh, que con volúmenes grandes sería caro.
 - **Garantizar el supuesto del watermark con varios escritores:** si bronze se cargara desde más de un proceso en paralelo, los timestamps de ingesta dejarían de ser monótonos respecto del commit (ver 1.6). Haría falta un número de secuencia asignado al confirmar cada carga, por ejemplo en una tabla de control, o un margen de reprocesamiento sobre el watermark.
 - **Alertas a un canal real** (Slack, email, PagerDuty) conectadas al `on_failure_callback`, y métricas del pipeline (registros por corrida, duración, frescura del dato) enviadas a un sistema de monitoreo.

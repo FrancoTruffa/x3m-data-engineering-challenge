@@ -11,6 +11,7 @@
 -- One row per line of a cart. line_number is the position in the cart's products array:
 -- (snapshot_date, cart_id, product_id) is not unique, the same product can appear in two lines.
 -- Incremental by ingestion watermark, same as silver.carts.
+-- With the dbt var force_date, only that day is rebuilt instead (macros/force_date.sql).
 select
     c.audit_logical_date                                  as snapshot_date,
     c.id                                                  as cart_id,
@@ -27,7 +28,5 @@ from {{ source('bronze', 'carts') }} as c
 cross join lateral jsonb_array_elements(c.data -> 'products')
     with ordinality as item (line, line_number)
 {% if is_incremental() %}
-where c.audit_ingestion_timestamp > (
-    select coalesce(max(ingested_at), '-infinity'::timestamptz) from {{ this }}
-)
+where {{ incremental_filter('c.audit_logical_date', 'c.audit_ingestion_timestamp') }}
 {% endif %}
