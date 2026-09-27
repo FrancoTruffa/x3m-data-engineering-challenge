@@ -8,6 +8,9 @@ x-airflow-common:
     dockerfile: docker/airflow/Dockerfile
     target: runtime
   image: x3m-airflow:3.3.2
+  # Local images, never in a registry: build instead of trying to pull (avoids a misleading
+  # "pull access denied" on first use, e.g. `docker compose run --rm tests`).
+  pull_policy: build
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
