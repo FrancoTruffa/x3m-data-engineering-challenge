@@ -103,14 +103,11 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 │   │   ├── silver/             # products.sql, carts.sql, cart_items.sql + schema.yml
 │   │   └── gold/               # product_daily_revenue.sql + schema.yml
 │   └── tests/                  # tests singulares: reconciliación de valor y volumen bronze→silver (silver/, gold/)
-├── tests/
-│   ├── unit/                   # client, loader, business_date, logging, run
-│   ├── dags/                   # integridad del DAG
-│   ├── dbt/                    # integración dbt: watermark, products, reprocesamiento, volumen, full refresh (DB temporal)
-│   └── fixtures/               # products.json, carts.json (incluye casos borde)
-├── scripts/
-│   └── load_fixtures.py        # carga fixtures en bronze (usado por CI)
-└── .github/workflows/ci.yml    # ruff + pytest + dbt build contra Postgres de servicio
+└── tests/
+    ├── unit/                   # client, loader, business_date, logging, run
+    ├── dags/                   # integridad del DAG
+    ├── dbt/                    # integración dbt: watermark, products, reprocesamiento, volumen, full refresh (DB temporal)
+    └── fixtures/               # products.json, carts.json (incluye casos borde)
 ```
 
 ## DAG

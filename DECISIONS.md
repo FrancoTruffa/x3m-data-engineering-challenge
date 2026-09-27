@@ -401,13 +401,14 @@ Para saber qué días o productos se reprocesaron, los tests comparan `xmin`, la
 
 **Fixtures** (`tests/fixtures/`): 3 carts y 6 productos reales de la API. Cubren un producto repetido en dos líneas del mismo cart (el 110 en el cart 38), un producto vendido que no está en el catálogo de las fixtures (el 161; en la API real sí existe, se excluyó de las fixtures a propósito) y un producto del catálogo sin ventas (el 1).
 
-**CI (GitHub Actions), en cada push:**
+**CI (GitHub Actions): diseño planeado, no implementado en esta entrega.** Hoy la verificación se hace localmente, con los comandos del README, y con las dos pruebas desde cero descritas en la sección 2. Lo que sigue es la especificación del workflow a implementar, en cada push:
 
-1. **`ruff`:** lint del código Python.
-2. **`pytest`:** tests unitarios.
-3. **`dbt build`** contra un PostgreSQL temporal levantado como servicio del job.
+1. **`ruff`:** lint y formato del código Python.
+2. **`pytest`:** la suite completa, la misma que corre `docker compose run --rm tests`: unitarios, integridad de los DAGs y tests de integración de dbt con fixtures, contra un PostgreSQL temporal levantado como servicio del job.
+3. **`dbt build`** de silver y gold sobre fixtures cargadas en bronze, contra ese mismo PostgreSQL.
+4. **Verificación en amd64:** construir la imagen y correr la suite en los runners de GitHub, que son amd64. Hasta ahora todo se ejecutó en arm64 (Apple Silicon). Las imágenes base son multi-arquitectura y las dependencias están fijadas, pero amd64 no está verificado.
 
-CI **no llama a la API real**: bronze se carga con fixtures versionadas en el repo (una muestra pequeña de products y carts que incluye casos borde como líneas de producto duplicadas dentro de un cart). Así las transformaciones y los tests de calidad se validan con datos controlados y el resultado es determinístico. CI reproduce de forma automatizada lo mismo que hará el evaluador: clonar el repo en una máquina limpia y ejecutarlo.
+El workflow **no llamaría a la API real**: bronze se cargaría con las fixtures versionadas en el repo (`tests/fixtures/`, una muestra pequeña de products y carts con casos borde, como líneas de producto duplicadas dentro de un cart). Así las transformaciones y los tests de calidad se validan con datos controlados y el resultado es determinístico. Las fixtures y los tests de integración que las cargan con el loader real ya existen; falta el workflow que los ejecute automáticamente. Automatizaría lo mismo que hará el evaluador: clonar el repo en una máquina limpia y ejecutarlo.
 
 **Observabilidad:** la extracción emite **logs estructurados (JSON)** con entidad, fecha de negocio, páginas recorridas, registros obtenidos frente al total esperado y duración. Las fallas se registran mediante `on_failure_callback` (ver 1.6).
 
