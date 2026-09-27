@@ -4,19 +4,19 @@ Este documento explica las decisiones técnicas del pipeline, sus trade-offs, c�
 
 ## Resumen ejecutivo
 
-- **Día cerrado, foto completa:** la actualización de medianoche UTC cierra el día anterior, así que la corrida del D+1 a las 00:30 carga el día D. Cada snapshot de carts se toma como la foto completa de las ventas de ese día (1.1).
-- **Bronze es la única historia:** la API no tiene historia ni acepta fechas. Bronze guarda cada snapshot crudo (`jsonb`); todo lo que está aguas abajo es re-procesable desde ahí, y la extracción no (1.1, 1.3).
-- **Tres fechas en bronze:** cuándo cambió el dato en el origen (`audit_event_timestamp`), cuándo lo cargamos (`audit_ingestion_timestamp`) y a qué día pertenece (`audit_logical_date`). Una guarda en la extracción impide cargar cualquier día que no sea el último cerrado (1.3, 1.6).
-- **`CronDataIntervalTimetable` explícito:** en Airflow 3 un cron escrito como string no tiene intervalo de datos y etiquetaría los datos del día D como D+1 (1.6).
-- **Incremental por watermark de ingesta:** dbt no recibe fechas. Cada modelo lee de la capa anterior solo lo cargado después de su último `ingested_at`, con índices y sin recorrer la historia; un día fallido se recupera solo en la corrida siguiente (1.4, 1.6).
-- **PostgreSQL sobre DuckDB:** varios procesos (extracción, dbt, consultas) usan la base a la vez, sin el bloqueo de escritura de un archivo embebido; además, `jsonb` para bronze (1.8).
-- **Reprocesamiento dirigido con `force_date`:** re-transforma un día desde bronze sin llamar a la API, y valida la fecha antes de tocar cualquier tabla (1.6).
-- **Chequeo de volumen bronze → silver acotado a la última carga:** detecta filas perdidas o de más sin recorrer la historia; complementa las reconciliaciones de valor (1.7).
+- **Día cerrado, foto completa:** la fuente se actualiza a medianoche UTC, y se interpreta que esa actualización cierra el día anterior: lo que la API muestra el día 26 son las ventas del 25. Por eso la corrida del día D+1 a las 00:30 UTC carga el día D. Cada snapshot de carts se toma como la foto completa de las ventas de ese día, no como un acumulado (1.1).
+- **Bronze es la única historia:** la API solo devuelve el estado actual, sin forma de pedir un día pasado. Lo que no se guarda ese día se pierde. Bronze guarda cada snapshot diario tal como vino, en JSON crudo, y es el único lugar donde queda la historia: silver y gold se pueden reconstruir desde bronze en cualquier momento, pero la extracción no se puede repetir para días pasados (1.1, 1.3).
+- **Tres fechas en bronze:** cada fila registra cuándo cambió el dato en el origen (`audit_event_timestamp`, solo products lo trae), cuándo lo cargó el pipeline (`audit_ingestion_timestamp`) y a qué día de negocio pertenece (`audit_logical_date`). Las dos últimas nunca coinciden: el día D se carga el D+1. Como la API solo expone el último día cerrado, una guarda en la extracción hace fallar cualquier corrida que intente cargarlo con otra fecha (1.3, 1.6).
+- **Schedule declarado con `CronDataIntervalTimetable`:** en Airflow 2, una corrida diaria representaba el intervalo del día anterior. En Airflow 3, un cron escrito como texto (`"30 0 * * *"`) representa solo el momento del disparo, sin intervalo, y los datos del día D quedarían etiquetados como D+1. Declarar el timetable de intervalos recupera la semántica correcta (1.6).
+- **Incremental por watermark de ingesta:** silver y gold no se reconstruyen enteros cada día. Cada modelo recuerda hasta qué carga procesó (su "watermark": el `audit_ingestion_timestamp` más reciente que ya incorporó) y en la corrida siguiente lee de la capa anterior solo lo cargado después, usando índices y sin recorrer la historia. dbt no necesita que Airflow le pase ninguna fecha, y si un día falla, la corrida siguiente lo procesa sola (1.4, 1.6).
+- **PostgreSQL y no DuckDB:** DuckDB es una base de un solo archivo, que admite un único proceso escribiendo a la vez. Acá varios procesos usan la base al mismo tiempo (la extracción, dbt y quien valide con una query), así que un servidor como PostgreSQL, que sí soporta conexiones concurrentes, evita ese problema. PostgreSQL además ofrece `jsonb`, un tipo JSON consultable con SQL, para guardar bronze crudo (1.8).
+- **Reprocesamiento dirigido con `force_date`:** si se corrige la lógica de un modelo, se puede reconstruir en silver y gold un día puntual que ya está en bronze, pasándole a dbt esa fecha, sin volver a llamar a la API y sin reconstruir todo. La fecha se valida antes de modificar cualquier tabla: si no existe en bronze, falla sin tocar nada (1.6).
+- **Chequeo de volumen bronze → silver:** un test compara, para el día recién procesado, cuántos carts y cuántas líneas por cart hay en bronze contra silver. Detecta filas que la transformación perdió o duplicó, algo que las reconciliaciones de montos no siempre ven (por ejemplo, un cart perdido entero no rompe ninguna suma). Mira solo la última carga para no releer toda la historia en cada corrida (1.7).
 - **Dos DAGs con reglas de seguridad opuestas:**
-  - el diario (`dummyjson_pipeline`) extrae de la API, así que nunca acepta una fecha elegida: solo el último día cerrado, con reintentos;
-  - el de reprocesamiento (`dummyjson_reprocess`) nunca extrae, así que exige una fecha explícita, es manual y no reintenta.
+  - el diario (`dummyjson_pipeline`) extrae de la API, y como la API solo tiene el día de hoy, nunca acepta una fecha elegida: carga siempre el último día cerrado, y reintenta ante fallas de red;
+  - el de reprocesamiento (`dummyjson_reprocess`) nunca llama a la API, solo re-transforma lo que ya está en bronze, así que exige que se le indique la fecha. Es manual y no reintenta, porque sus fallas (una fecha inválida, un test que falla) no se arreglan reintentando.
 
-  Comparten un pool de un solo slot para que sus builds de dbt no se superpongan (1.6).
+  Los dos comparten un pool de Airflow de un solo slot, para que sus procesos de dbt nunca corran al mismo tiempo sobre las mismas tablas (1.6).
 
 ---
 
