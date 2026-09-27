@@ -41,9 +41,35 @@ Se usa una arquitectura medallion de tres capas:
 
 | Capa | Responsabilidad | Estrategia de escritura |
 |---|---|---|
-| **Bronze** | JSON crudo tal como vino de la API, con campos de auditoría | Append entre días; reemplazo dentro del mismo día (idempotente) |
-| **Silver** | Aplanado, tipado, deduplicación; una fila por clave del grano | Upsert + dedup, con la clave según el grano de cada tabla |
-| **Gold** | Agregado de negocio `product_daily_revenue` | Reemplazo por día (incremental) |
+| **Bronze** | JSON crudo tal como vino de la API, con campos de auditoría | Se agrega un día nuevo por corrida. Si se recarga el mismo día (un reintento), sus filas se borran y se vuelven a insertar: nunca se duplican |
+| **Silver** | JSON aplanado y tipado; una fila por clave del grano | Incremental: solo se procesan los días con cargas nuevas en bronze, y cada uno se reemplaza completo (`carts`, `cart_items`). En `products`, se reemplazan solo los productos que llegaron en la carga nueva |
+| **Gold** | Agregado de negocio `product_daily_revenue` | Incremental: solo se recalculan los días con datos nuevos en silver, y cada uno se reemplaza completo con el agregado recalculado. Los días anteriores no se tocan |
+
+**Cómo se escribe en silver y gold: `delete+insert`.** La idea es "de la tabla destino, borrar todo lo que corresponde a los bloques que trae el lote y poner en su lugar lo que trae el lote". No compara fila por fila: reemplaza bloques enteros. En `carts`, `cart_items` y gold el bloque es un día; en `products`, un producto. Ejemplo con `silver.carts`, que tiene el 25 y el 26, cuando se reintenta la carga del 26 y ahora trae solo los carts 1 y 2:
+
+| Antes | Lote nuevo | Después |
+|---|---|---|
+| 25 · cart 1 · 100 | | 25 · cart 1 · 100 |
+| 25 · cart 2 · 200 | | 25 · cart 2 · 200 |
+| 26 · cart 1 · 110 | 26 · cart 1 · 115 | 26 · cart 1 · 115 |
+| 26 · cart 2 · 210 | 26 · cart 2 · 205 | 26 · cart 2 · 205 |
+| 26 · cart 3 · 50 | | *(ya no está)* |
+
+1. **Armar el lote:** dbt ejecuta el `SELECT` del modelo con el filtro del watermark (ver 1.6) y guarda el resultado en una tabla temporal. Acá, las dos filas nuevas del 26.
+2. **Borrar:** mira qué días hay en el lote (solo el 26) y borra de la tabla **todas** las filas de ese día, incluido el cart 3, aunque no venga en el lote. El 25 no se toca.
+3. **Insertar:** copia el lote completo.
+
+El día 26 queda exactamente igual a su última foto. Tres propiedades lo hacen seguro:
+- **Qué bloques se reemplazan lo decide el lote.** El `unique_key` del modelo indica la columna del borrado. Si el lote trae un día, se reemplaza un día; si trae dos (una recuperación), dos; si viene vacío, no se borra nada.
+- **Es atómico:** el borrado y la inserción van en una misma transacción. Si la inserción falla, el borrado se deshace y el bloque nunca queda a medio reemplazar.
+- **Es idempotente:** procesar dos veces el mismo lote da el mismo resultado, sin duplicados. En eso se apoyan los reintentos y el reprocesamiento dirigido.
+
+**Por qué reemplazo y no upsert + dedup.** Upsert + dedup es el patrón para fuentes que mandan **cambios** (CDC, APIs incrementales): cada lote trae solo algunos registros, así que hay que actualizar los existentes sin tocar el resto (upsert) y quedarse con la última versión cuando una clave viene repetida (dedup). DummyJSON manda otra cosa: **la foto completa de cada día**.
+- **Entre días no hay nada que actualizar:** el grano de `carts` es `(snapshot_date, cart_id)`, y el día 26 agrega sus filas sin modificar las del 25.
+- **Dentro de un día, un upsert dejaría basura:** la única re-carga posible es un reintento con la foto completa, y un upsert no borra lo que dejó de venir. En el ejemplo, el cart 3 quedaría huérfano, y lo mismo una línea que un cart dejó de tener. El reemplazo del día lo evita.
+- **La deduplicación ya está resuelta antes de silver:** bronze tiene clave única `(id, audit_logical_date)`, la extracción valida que no haya ids repetidos y el loader reemplaza el día entero. A silver nunca le llegan dos versiones del mismo cart para el mismo día. Las líneas del mismo producto dentro de un cart no son duplicados: por eso existe `line_number` (ver 1.4).
+
+**`silver.products` sí es upsert + dedup en la práctica,** porque representa **estado actual** (SCD1) y no fotos diarias. Si el lote trae varios días, se queda con el snapshot más reciente de cada producto (dedup). Después reemplaza solo los productos que llegaron, y los demás conservan su último estado (upsert). Para reemplazar una fila entera por clave, `delete+insert` y `merge` dan el mismo resultado; se usa `delete+insert` por consistencia con el resto.
 
 **Separación de responsabilidades:** Airflow (Python) solo extrae y carga en bronze. Las transformaciones bronze → silver → gold viven en dbt (SQL). Así, toda la lógica de transformación queda en un solo lugar, con tests y linaje, y bronze se mantiene crudo y desacoplado del schema.
 
@@ -85,7 +111,7 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 
 **Modelos y granos:**
 
-| Modelo | Grano | Clave del upsert | Comportamiento ante un día nuevo |
+| Modelo | Grano | Bloque que se reemplaza (`unique_key`) | Comportamiento ante un día nuevo |
 |---|---|---|---|
 | `silver.products` | `product_id` | `product_id` | Se reemplaza la fila con el estado más reciente |
 | `silver.carts` | `(snapshot_date, cart_id)` | `snapshot_date` | Se agregan filas; los días anteriores no se tocan |
@@ -94,7 +120,7 @@ En pipelines CDC, el timestamp del evento de origen suele alcanzar para ubicar e
 - **Products como estado actual (SCD1):** es una dimensión y para el reporte interesa el valor vigente. Si hiciera falta historia de precios o títulos, se puede construir un SCD2 porque bronze conserva todos los snapshots.
 - **Carts con historia diaria:** es el hecho y de él sale la fecha de gold. Un upsert solo por `cart_id` pisaría el día anterior y destruiría la historia.
 - **Carts y cart_items separados:** se evita repetir los totales del cart en cada línea y se habilita un control de reconciliación entre la suma de líneas y el total del cart.
-- **Upsert de carts como reemplazo del día completo** (estrategia incremental `delete+insert` por `snapshot_date`) en lugar de un `MERGE` fila por fila. Si en un reintento un cart deja de aparecer, el `MERGE` dejaría la fila vieja huérfana; el reemplazo del día deja el día exactamente igual al último snapshot.
+- **Escritura de carts como reemplazo del día completo** (estrategia incremental `delete+insert` por `snapshot_date`, explicada en 1.2) en lugar de un `MERGE` fila por fila. Si en un reintento un cart deja de aparecer, el `MERGE` dejaría la fila vieja huérfana; el reemplazo del día deja el día exactamente igual al último snapshot.
 - **`line_number`:** posición del producto dentro del array del cart (`jsonb_array_elements ... WITH ORDINALITY`). Es necesario porque `(snapshot_date, cart_id, product_id)` **no es único**: en la verificación de la fuente, el cart 7 contiene el producto 56 en dos líneas separadas, y en el snapshot del 24/09 había 12 pares (cart, producto) repetidos sobre 800 líneas.
 - **Líneas duplicadas:** se mantienen separadas en silver por fidelidad al origen (no se puede saber si son un error o líneas legítimas) y se consolidan en gold al agregar.
 - **Montos en `numeric`:** la fuente trae errores de punto flotante (por ejemplo, `99.94999999999999`). Todo lo monetario se castea a `numeric(12,2)`.
