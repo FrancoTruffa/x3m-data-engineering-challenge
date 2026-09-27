@@ -1,8 +1,22 @@
 # DECISIONS.md
 
-> Borrador en progreso. Las secciones marcadas como **[PENDIENTE]** se completan a medida que avanza la implementación.
-
 Este documento explica las decisiones técnicas del pipeline, sus trade-offs, cómo usé herramientas de IA durante el desarrollo y qué quedó deliberadamente fuera de alcance.
+
+## Resumen ejecutivo
+
+- **Día cerrado, foto completa:** la actualización de medianoche UTC cierra el día anterior, así que la corrida del D+1 a las 00:30 carga el día D. Cada snapshot de carts se toma como la foto completa de las ventas de ese día (1.1).
+- **Bronze es la única historia:** la API no tiene historia ni acepta fechas. Bronze guarda cada snapshot crudo (`jsonb`); todo lo que está aguas abajo es re-procesable desde ahí, y la extracción no (1.1, 1.3).
+- **Tres fechas en bronze:** cuándo cambió el dato en el origen (`audit_event_timestamp`), cuándo lo cargamos (`audit_ingestion_timestamp`) y a qué día pertenece (`audit_logical_date`). Una guarda en la extracción impide cargar cualquier día que no sea el último cerrado (1.3, 1.6).
+- **`CronDataIntervalTimetable` explícito:** en Airflow 3 un cron escrito como string no tiene intervalo de datos y etiquetaría los datos del día D como D+1 (1.6).
+- **Incremental por watermark de ingesta:** dbt no recibe fechas. Cada modelo lee de la capa anterior solo lo cargado después de su último `ingested_at`, con índices y sin recorrer la historia; un día fallido se recupera solo en la corrida siguiente (1.4, 1.6).
+- **PostgreSQL sobre DuckDB:** varios procesos (extracción, dbt, consultas) usan la base a la vez, sin el bloqueo de escritura de un archivo embebido; además, `jsonb` para bronze (1.8).
+- **Reprocesamiento dirigido con `force_date`:** re-transforma un día desde bronze sin llamar a la API, y valida la fecha antes de tocar cualquier tabla (1.6).
+- **Chequeo de volumen bronze → silver acotado a la última carga:** detecta filas perdidas o de más sin recorrer la historia; complementa las reconciliaciones de valor (1.7).
+- **Dos DAGs con reglas de seguridad opuestas:**
+  - el diario (`dummyjson_pipeline`) extrae de la API, así que nunca acepta una fecha elegida: solo el último día cerrado, con reintentos;
+  - el de reprocesamiento (`dummyjson_reprocess`) nunca extrae, así que exige una fecha explícita, es manual y no reintenta.
+
+  Comparten un pool de un solo slot para que sus builds de dbt no se superpongan (1.6).
 
 ---
 
@@ -403,8 +417,6 @@ CI **no llama a la API real**: bronze se carga con fixtures versionadas en el re
 
 ## 2. Flujo de trabajo con IA
 
-**[PENDIENTE: completar con la etapa de implementación]**
-
 **Diseño (Claude, sesión de chat).** Usé Claude para discutir la interpretación del problema y el diseño de capas antes de escribir código. Trabajé en modo de discusión: la IA proponía, yo cuestionaba y las decisiones finales se tomaron sobre esa base. Casos concretos donde el output se validó o se corrigió:
 
 - **Verificación contra la fuente real.** Antes de fijar el diseño se consultaron los endpoints reales. La IA había estimado de memoria que había 50 carts; la API informaba 208. También apareció el caso del cart 7 con un producto duplicado, que invalidaba el grano `(snapshot_date, cart_id, product_id)` propuesto inicialmente y obligó a agregar `line_number`.
@@ -415,16 +427,9 @@ CI **no llama a la API real**: bronze se carga con fixtures versionadas en el re
 - **Fecha lógica.** Cuestioné la necesidad de una tercera fecha, porque en mi experiencia con CDC alcanzaban dos. La discusión dejó claro que la diferencia no está en los reintentos sino en la semántica: bajo la interpretación de "día cerrado", la fecha del dato y la de ejecución difieren siempre, y la fecha lógica evita una regla implícita acoplada al schedule.
 - **Nomenclatura.** Ajusté los nombres para que `revenue` y `gross_revenue` fueran explícitos y consistentes en inglés.
 
-**Implementación (Claude Code).** [PENDIENTE: completar al cerrar las fases restantes]
+**Implementación (Claude Code).**
 
 Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de avanzar y de consultar la documentación de la versión fijada de Airflow en lugar de asumir el comportamiento de Airflow 2. Casos concretos:
-
-**CLAUDE.md como contrato de trabajo.** Antes de escribir código dejé en `CLAUDE.md` las restricciones no negociables, las decisiones ya cerradas (con referencia a este documento) y una regla explícita: si algo de la implementación contradice una decisión tomada, avisar antes de desviarse. Esa regla funcionó así:
-- **Hallazgo de Airflow 3 (fase 2):** la IA frenó y consultó. Al ver que la primera corrida cargaba bronze con la fecha equivocada, detuvo el trabajo, explicó la causa y planteó las opciones antes de cambiar el schedule.
-- **Cambios a decisiones documentadas** (pasar de `--vars` a watermark, `silver.products` incremental): la IA señaló que contradecían lo escrito y pidió confirmación antes de implementar.
-- **`watermark_ingested_at`, donde la regla se cumplió a medias:** la IA avisó que agregaba una columna que no estaba en el diseño, pero la implementó en el mismo paso sin esperar confirmación. El desvío se detectó en mi revisión y se revirtió (ver "Defender un escenario que había que prohibir"). Avisar no alcanza si no se espera la respuesta; desde entonces, cualquier agregado al diseño se propone y se implementa recién después del OK.
-
-`CLAUDE.md` se fue actualizando con cada decisión nueva (timetable explícito, watermark, guarda, pool), para que el contrato siguiera reflejando el diseño vigente.
 
 - **Semántica de schedules cron en Airflow 3 (fase 2).** El diseño (sección 1.6) asumía que la corrida del D+1 cubre el intervalo del día D, como en Airflow 2. El DAG se escribió con el schedule como string cron y los tests unitarios pasaban, porque probaban `resolve_business_date` con un `data_interval_start` que armaba el propio test. El error apareció recién en la primera corrida real: bronze quedó con `audit_logical_date = 2026-09-25` en vez de `2026-09-24`. Consultando la metadata de la corrida se vio que `logical_date`, `data_interval_start` y `data_interval_end` eran iguales, por el nuevo default `create_cron_data_intervals = False`. Se corrigió declarando `CronDataIntervalTimetable`, y se agregó un test de integridad que falla si el DAG vuelve a un timetable sin intervalos. Lección: los tests unitarios validan la lógica contra los supuestos del código; solo la ejecución real valida los supuestos contra la plataforma.
 - **Corridas manuales.** El comportamiento de las corridas manuales (sin `logical_date` ni intervalo) se confirmó con triggers reales por REST y por CLI antes de darlo por cerrado, y no solo con la documentación.
@@ -442,6 +447,20 @@ Trabajé por fases, con la consigna de verificar cada una ejecutándola antes de
 
   En la misma verificación, un disparo con un parámetro malicioso (`"24/09/2026; rm -rf /"`) lo rechazó la API con HTTP 400, antes de llegar a la shell.
 - **Tests que no probaban lo que decían.** Un test de reintentos ante `Retry-After` pasaba aunque se cambiara el código a respetar el header. La causa: la librería de mocks HTTP simula los reintentos sin ejecutar nunca la espera. Se detectó con una prueba de mutación (cambiar el código y confirmar que el test falle) y el test se reescribió. Desde entonces, los tests de comportamiento crítico (watermark, `Retry-After`) se validan con mutaciones.
+- **Prueba real desde cero (fase 6).** Antes de cerrar la documentación, hice la prueba que va a hacer el evaluador. Bajé el stack con sus volúmenes, borré las imágenes y el caché de build de Docker, cloné el repo en un directorio nuevo y seguí **solo** el README, anotando cada paso que había que inferir.
+  - **Resultado:** el pipeline, los tests y el reprocesamiento funcionaron sin tocar código, pero aparecieron **12 huecos de documentación**. Ninguno era de funcionalidad. Por ejemplo: cómo clonar, una query de validación, cómo consultar el warehouse sin un cliente SQL instalado, cómo saber que el pipeline terminó, ejemplos de reprocesamiento con una fecha que no existe en una instalación nueva, el Triggerer en rojo en la UI y la ventana de 00:00 a 00:30 UTC.
+  - **Un mensaje engañoso:** Docker mostraba un "pull access denied" al construir la imagen de tests por primera vez. Se corrigió en el compose (`pull_policy: build`), no solo en el README.
+  - **Repetición:** con el README reescrito, la prueba se repitió desde cero y no quedó ningún paso sin documentar. Las queries de validación devolvieron exactamente la salida esperada publicada.
+- **Correcciones sobre la propia prueba.**
+  - **El botón de la UI:** en la primera prueba, la IA reportó que, con la UI en español, el botón para disparar un DAG se llamaba "Activar Dag" y no "Trigger" como decía el README. Al verificarlo de punta a punta, el botón visible dice "Trigger": "Activar Dag" era solo su nombre de accesibilidad, que es lo que lee la herramienta. El README estaba bien y no se cambió.
+  - **Los tiempos:** los que dice el README salen de la medición de la prueba, no de estimaciones. La estimación inicial para el build de la imagen de tests (~1 minuto) resultó ser de unos segundos, porque reutiliza la imagen de Airflow, y se corrigió.
+
+**CLAUDE.md como contrato de trabajo.** Antes de escribir código dejé en `CLAUDE.md` las restricciones no negociables, las decisiones ya cerradas (con referencia a este documento) y una regla explícita: si algo de la implementación contradice una decisión tomada, avisar antes de desviarse. Esa regla funcionó así:
+- **Hallazgo de Airflow 3 (fase 2):** la IA frenó y consultó. Al ver que la primera corrida cargaba bronze con la fecha equivocada, detuvo el trabajo, explicó la causa y planteó las opciones antes de cambiar el schedule.
+- **Cambios a decisiones documentadas** (pasar de `--vars` a watermark, `silver.products` incremental): la IA señaló que contradecían lo escrito y pidió confirmación antes de implementar.
+- **`watermark_ingested_at`, donde la regla se cumplió a medias:** la IA avisó que agregaba una columna que no estaba en el diseño, pero la implementó en el mismo paso sin esperar confirmación. El desvío se detectó en mi revisión y se revirtió (ver "Defender un escenario que había que prohibir"). Avisar no alcanza si no se espera la respuesta; desde entonces, cualquier agregado al diseño se propone y se implementa recién después del OK.
+
+`CLAUDE.md` se fue actualizando con cada decisión nueva (timetable explícito, watermark, guarda, pool), para que el contrato siguiera reflejando el diseño vigente.
 
 ---
 

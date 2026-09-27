@@ -71,7 +71,7 @@ Challenge técnico de Data Engineering (X3M). Pipeline batch que ingiere Product
 ├── README.md
 ├── DECISIONS.md
 ├── CLAUDE.md
-├── docker-compose.yml          # stack + servicio `tests` (profile dev)
+├── docker-compose.yml          # stack + servicio `tests` (profile dev); imágenes de Airflow con pull_policy: build
 ├── pyproject.toml              # config de ruff y pytest
 ├── requirements/
 │   ├── airflow.txt             # deps de runtime de Airflow (con constraints)
@@ -126,6 +126,8 @@ extract_carts ────┘
 - Código, identificadores y comentarios en inglés. Documentación (README, DECISIONS) en español.
 - Toda la lógica en `src/`; el DAG solo orquesta.
 - Sin secretos en el repo. Las credenciales locales del compose son valores por defecto de desarrollo y se documentan como tales.
+- Las imágenes propias (`x3m-airflow`, `x3m-airflow-dev`) no están en ningún registro: el compose las declara con `pull_policy: build`, para que Docker las construya en lugar de intentar descargarlas (sin eso, el primer `docker compose run --rm tests` mostraba un "pull access denied" engañoso). Toda imagen propia nueva lleva lo mismo.
+- **README:** secciones numeradas: requisitos, obtener el proyecto, levantar, ver que el pipeline terminó, consultar el resultado (con las queries de validación y su salida esperada), tests, reprocesamiento (de un día y completo), bajar y limpiar, y notas. Cualquier cambio en comandos, tiempos o en la salida de las queries se refleja ahí, y se verifica con una prueba desde cero siguiendo solo el README. Los tiempos se miden, no se estiman.
 - Lint y tests corren en Docker: `docker compose run --rm tests` (pytest) y `docker compose run --rm tests ruff check .`.
 
 ## Forma de trabajo
