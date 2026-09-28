@@ -25,8 +25,10 @@ models:
 
   - name: carts
     description: >
-      One row per cart per daily snapshot. Incremental by ingestion watermark: dates whose bronze
-      load is newer than `ingested_at` are replaced (delete+insert by snapshot_date).
+      One row per cart per daily snapshot. Incremental by ingestion watermark: reads only the
+      bronze rows loaded after the latest `ingested_at` already here (whole days, one timestamp
+      per load) and replaces those days (delete+insert by snapshot_date). With the var
+      force_date, only that day is rebuilt.
     data_tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
